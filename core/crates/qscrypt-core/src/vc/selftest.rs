@@ -34,14 +34,19 @@ pub const SECTOR_CRCS: [(Ea, [u32; 4]); 8] = [
     (Ea::TwofishSerpent, [0x2686_C859, 0x8A20_1780, 0x8DD1_3796, 0xE951_96CB]),
 ];
 
+/// Third primary key row of the test data (three-cipher cascades only),
+/// as found in the TrueCrypt sources VeraCrypt inherited it from.
+pub const KEY_ROW3: [u8; 32] = [
+    0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+    0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13,
+];
+
 /// Primary key rows used by the test (row 0 is all single ciphers need).
 pub fn default_key1() -> [u8; 96] {
     let mut k = [0u8; 96];
     k[..32].copy_from_slice(&KEY_E);
     k[32..64].copy_from_slice(&KEY_PI);
-    for (i, b) in k[64..].iter_mut().enumerate() {
-        *b = i as u8;
-    }
+    k[64..].copy_from_slice(&KEY_ROW3);
     k
 }
 
