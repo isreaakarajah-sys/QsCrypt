@@ -182,9 +182,9 @@ fn veracrypt_sector_selftest() {
     // in-app self-test, so a mismatch there is reported, not fatal.
     eprintln!("VeraCrypt cascade self-test: {report:#?}");
     assert!(all_found, "cascades: {report:#?}");
-    if !all_default {
-        eprintln!("NOTE: selftest::default_key1() should be updated to the matching rows above");
-    }
+    // Confirmed in CI (build 6): rows e, pi and KEY_ROW3 reproduce all of
+    // VeraCrypt's cascade CRCs, so the in-app self-test must pass too.
+    assert!(all_default, "default rows no longer match VeraCrypt: {report:#?}");
 }
 
 #[test]
