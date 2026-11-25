@@ -1,0 +1,15 @@
+[package]
+name = "qscrypt-ffi"
+description = "JNI bridge between the QsCrypt engine and the Android app"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+qscrypt-core = { path = "../qscrypt-core" }
+qscrypt-crypto = { path = "../qscrypt-crypto" }
+jni = "0.21"

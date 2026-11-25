@@ -1,0 +1,18 @@
+[package]
+name = "qscrypt-core"
+description = "QsCrypt engine: VeraCrypt/TrueCrypt volumes, FAT/exFAT, the QsCrypt file format"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+# No dependencies on purpose: everything here is pure logic that can be built
+# and tested offline. Production primitives come from `qscrypt-crypto`, which
+# implements the `crypto::Backend` trait on top of the RustCrypto crates.
+[dependencies]
+
+[features]
+default = []
+# Pure-Rust reference primitives (SHA-2, HMAC, PBKDF2, AES). Used by the test
+# suite and to cross-check production backends. Never used in release builds.
+reference = []

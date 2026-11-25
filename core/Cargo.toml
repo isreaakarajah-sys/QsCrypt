@@ -1,0 +1,23 @@
+[workspace]
+members = ["crates/qscrypt-core", "crates/qscrypt-crypto", "crates/qscrypt-ffi"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Proprietary"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+# Unwind (the default) so the JNI layer can catch a panic and report it.
+strip = true
+
+# Key derivation runs 500 000 HMAC rounds; keep tests usable in debug builds.
+[profile.test]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 2

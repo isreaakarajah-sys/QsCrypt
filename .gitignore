@@ -1,0 +1,20 @@
+# Signing keys must never be committed
+*.jks
+*.keystore
+*.p12
+signing/
+
+# Rust
+core/target/
+
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/app/src/main/jniLibs/
+*.iml
+.DS_Store
+__pycache__/
+*.pyc
