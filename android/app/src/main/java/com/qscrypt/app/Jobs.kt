@@ -208,6 +208,7 @@ object Jobs {
                     Run(job, context.applicationContext).work()
                 }
             } catch (e: Throwable) {
+                Diag.error("job ${job.kind}", e)
                 Reply(JSONObject().put("ok", false).put("code", "internal").put("message", e.message ?: e.toString()).toString())
             } finally {
                 slot.release()
@@ -217,7 +218,10 @@ object Jobs {
                 r.code == "cancelled" || job.cancelFlag.get() -> State.Cancelled
                 else -> State.Failed
             }
-            if (!r.ok && job.state == State.Failed) job.result = r.error
+            if (!r.ok && job.state == State.Failed) {
+                job.result = r.error
+                Diag.warn("job", "${job.kind} failed: ${r.code} ${r.message.take(200)}")
+            }
             if (r.ok && job.result.isEmpty()) job.result = r.json.optString("summary")
             val spec = job.spec
             if (job.state == State.Cancelled && job.interrupted && spec != null) {

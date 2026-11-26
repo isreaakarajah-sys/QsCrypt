@@ -27,9 +27,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.qscrypt.app.Activation
 import com.qscrypt.app.Prefs
 import com.qscrypt.app.R
@@ -82,6 +81,8 @@ fun ActivationScreen(onDone: () -> Unit) {
         }
     }
 
+    // The app's fonts are still sealed here, so every text on this screen is
+    // drawn from outlines of those fonts (android/tools/text_art.py).
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -91,13 +92,9 @@ fun ActivationScreen(onDone: () -> Unit) {
         Gap(20.dp)
         Image(painterResource(R.drawable.qs_wordmark), contentDescription = "QsCrypt", modifier = Modifier.size(width = 168.dp, height = 42.dp))
         Gap(24.dp)
-        Text("تفعيل التطبيق", style = T.display, textAlign = TextAlign.Center)
-        Gap(8.dp)
-        Text(
-            "أدخل كلمة التفعيل التي وصلتك مع التطبيق. تُطلب مرة واحدة فقط على هذا الجهاز.",
-            style = T.body.copy(fontSize = 15.sp, lineHeight = 24.sp, color = Qs.muted),
-            textAlign = TextAlign.Center,
-        )
+        Art(R.drawable.art_act_title, "تفعيل التطبيق", Qs.ivory)
+        Gap(12.dp)
+        Art(R.drawable.art_act_intro, "أدخل كلمة التفعيل التي وصلتك مع التطبيق. تُطلب مرة واحدة فقط على هذا الجهاز.", Qs.muted)
         Gap(28.dp)
         QsField(
             value = code,
@@ -105,14 +102,21 @@ fun ActivationScreen(onDone: () -> Unit) {
             placeholder = "رمز التفعيل",
             password = true,
             highlighted = true,
+            placeholderContent = { Art(R.drawable.art_act_field, "رمز التفعيل", Qs.muted) },
         )
         Gap(10.dp)
-        val message = when {
-            waitMs > 0L -> "محاولات كثيرة خاطئة. انتظر ${(waitMs + 999) / 1000} ثانية"
-            else -> error
-        }
-        if (message != null) {
-            Text(message, style = T.small.copy(color = Qs.coral), textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+        if (waitMs > 0L) {
+            val seconds = ((waitMs + 999) / 1000).toString()
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.semantics(mergeDescendants = true) {}) {
+                Art(R.drawable.art_act_wait, "محاولات كثيرة خاطئة. انتظر", Qs.coral)
+                Spacer(Modifier.width(6.dp))
+                Text(seconds, style = T.monoLarge.copy(color = Qs.coral))
+                Spacer(Modifier.width(6.dp))
+                Art(R.drawable.art_act_seconds, "ثانية", Qs.coral)
+            }
+            Gap(10.dp)
+        } else if (error != null) {
+            Art(R.drawable.art_act_wrong, error, Qs.coral)
             Gap(10.dp)
         }
         Gap(8.dp)
@@ -120,13 +124,13 @@ fun ActivationScreen(onDone: () -> Unit) {
             Row(Modifier.fillMaxWidth().height(56.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(color = Qs.brass, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
                 Spacer(Modifier.width(12.dp))
-                Text("جاري التحقق…", style = T.label.copy(color = Qs.ivory))
+                Art(R.drawable.art_act_checking, "جاري التحقق", Qs.ivory)
             }
         } else {
-            PrimaryButton("تفعيل", icon = R.drawable.ic_key, enabled = code.isNotBlank() && waitMs == 0L) { submit() }
+            PrimaryArtButton(R.drawable.art_act_button, "تفعيل", icon = R.drawable.ic_key, enabled = code.isNotBlank() && waitMs == 0L) { submit() }
         }
         Gap(20.dp)
-        Note("هذه النسخة خاصة بك وبمن تشاركه معهم. كلمة التفعيل تفكّ أيضاً خطوط التطبيق المشفّرة، ولا تُحفظ على الجهاز.", icon = R.drawable.ic_shield)
+        ArtNote(R.drawable.art_act_note, "هذه النسخة خاصة بك وبمن تشاركه معهم. كلمة التفعيل تفكّ أيضًا خطوط التطبيق المشفّرة، ولا تُحفظ على الجهاز.")
         Gap(24.dp)
     }
 }

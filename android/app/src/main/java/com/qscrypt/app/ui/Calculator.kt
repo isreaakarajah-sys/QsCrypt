@@ -38,6 +38,9 @@ import androidx.compose.ui.unit.sp
 import com.qscrypt.app.AppState
 import com.qscrypt.app.PhoneAuth
 import com.qscrypt.app.Prefs
+import com.qscrypt.app.Profile
+import com.qscrypt.app.CODE_WRONG
+import com.qscrypt.app.CODE_DURESS
 import com.qscrypt.app.SECRET_PATTERN
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -177,9 +180,10 @@ fun CalculatorScreen() {
                 if (looksLikeCode(code) && Prefs.lockUntil <= System.currentTimeMillis()) {
                     checking = true
                     scope.launch {
-                        val ok = withContext(Dispatchers.Default) { Prefs.checkPin(code) }
+                        val which = withContext(Dispatchers.Default) { Prefs.whichCode(code) }
                         checking = false
-                        if (ok) {
+                        if (which != CODE_WRONG) {
+                            Profile.enter(which == CODE_DURESS)
                             opened()
                         } else {
                             // Looks like an ordinary calculation; counts as a failed attempt.

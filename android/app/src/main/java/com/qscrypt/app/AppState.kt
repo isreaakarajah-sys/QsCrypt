@@ -35,6 +35,8 @@ sealed interface Screen {
     data object Bench : Screen
     data object Message : Screen
     data object Attempts : Screen
+    data object Diag : Screen
+    data object Backup : Screen
     /** Files shared to QsCrypt from another app. */
     data object ShareIn : Screen
 }
@@ -117,6 +119,17 @@ object AppState {
 
     fun load() {
         containers = Prefs.containers()
+    }
+
+    /** The profile changed (see [Profile]): nothing of the previous one may stay on screen. */
+    fun profileChanged() {
+        stack.clear()
+        stack.add(Screen.Home)
+        clip = null
+        shared = emptyList()
+        encryptShared = emptyList()
+        attemptsToReport = 0
+        load()
     }
 
     fun addContainer(c: Container): Container {
@@ -238,7 +251,7 @@ object AppState {
             return
         }
         pickerOpen = false
-        if (away >= Prefs.autoLockMs) lock()
+        if (Prefs.lockOnLeave && away >= Prefs.autoLockMs) lock()
     }
 
     /** Locks the app; vaults close too if the setting says so (or `force`). */

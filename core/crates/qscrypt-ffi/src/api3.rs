@@ -40,6 +40,7 @@ pub fn call(method: &str, c: &Call, progress: &mut dyn FnMut(u64, u64) -> bool) 
         }
         "fs.copy" => copy(c, progress),
         "fs.tree" => tree(c),
+        "fs.find" => find(c, progress),
         "bench.run" => bench(progress),
         "disguise.wrap" => disguise_wrap(c, progress),
         "disguise.unwrap" => disguise_unwrap(c, progress),
@@ -48,6 +49,62 @@ pub fn call(method: &str, c: &Call, progress: &mut dyn FnMut(u64, u64) -> bool) 
         "msg.open" => msg_open(c),
         _ => return None,
     })
+}
+
+/// Methods of this file that return bytes (None on any error).
+pub fn call_bytes(method: &str, c: &Call) -> Option<Vec<u8>> {
+    match method {
+        "backup.seal" => backup_seal(c).ok(),
+        "backup.open" => backup_open(c).ok(),
+        _ => None,
+    }
+}
+
+// ------------------------------------------------------------ app backups
+
+/// The name stored inside a backup file (QsCrypt v2, password only).
+const BACKUP_NAME: &str = "QsCrypt backup.json";
+
+/// Seals the app's backup bundle (identity, contacts, vault list) with a password.
+fn backup_seal(c: &Call) -> Result<Vec<u8>> {
+    let data = c.blob("data").filter(|d| !d.is_empty()).ok_or_else(|| Error::invalid("nothing to back up"))?;
+    let pw = c.blob("password").filter(|p| !p.is_empty()).ok_or_else(|| Error::invalid("a password is needed"))?;
+    let opts = Options {
+        password: Some(pw),
+        duress: None,
+        recovery: None,
+        recipients: &[],
+        signer: None,
+        policy: Policy::default(),
+        params: Params::default(),
+    };
+    let now = c.args.get("now").i64_or(0);
+    let meta = Meta { name: BACKUP_NAME.into(), modified: now, size: data.len() as u64 };
+    let mut out = Vec::with_capacity(data.len() + 4096);
+    qsc2::encrypt(backend(), &opts, &meta, now, &mut &data[..], &mut out, &mut |_, _| true)?;
+    Ok(out)
+}
+
+/// Opens a backup made by [backup_seal]; refuses any other QsCrypt file.
+fn backup_open(c: &Call) -> Result<Vec<u8>> {
+    let data = c.blob("data").ok_or_else(|| Error::invalid("missing backup"))?;
+    let pw = c.blob("password").filter(|p| !p.is_empty()).ok_or(Error::WrongPassword)?;
+    let mut input = Cursor::new(data);
+    let h = qsc2::read_header(&mut input)?;
+    if h.flags & qsc2::FLAG_CONTAINER != 0 {
+        return Err(Error::corrupt("not a QsCrypt backup"));
+    }
+    let u = qsc2::unlock(backend(), &h, &qsc2::Unlock::Password(pw))?;
+    if u.duress {
+        return Err(Error::WrongPassword);
+    }
+    let mut out = Vec::new();
+    let d = qsc2::decrypt(backend(), &h, &u.file_key, &mut input, Some(&mut out), &mut |_, _| true)?;
+    if d.meta.name != BACKUP_NAME {
+        wipe(&mut out);
+        return Err(Error::corrupt("not a QsCrypt backup"));
+    }
+    Ok(out)
 }
 
 // ------------------------------------------------------------ plain volumes
@@ -114,6 +171,53 @@ fn walk(fs: &mut dyn FileSystem, dir: &str, out: &mut Vec<(String, bool, u64)>) 
         }
     }
     Ok(())
+}
+
+/// Items whose name contains the query (ignoring case), in a folder and
+/// every folder below it. Stops after `max` matches; reports `truncated`.
+fn find(c: &Call, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result<String> {
+    let h = c.args.get("handle").i64_or(0);
+    let path = c.args.get("path").str_or("/").to_string();
+    let query = c.args.get("query").str_or("").trim().to_lowercase();
+    let max = c.args.get("max").u64_or(500).clamp(1, 5000) as usize;
+    if query.is_empty() {
+        return Err(Error::invalid("empty query"));
+    }
+    api::with_vault(h, |v| {
+        let mut found = Vec::new();
+        let mut scanned = 0u64;
+        let mut truncated = false;
+        let mut dirs = vec![path.clone()];
+        while let Some(dir) = dirs.pop() {
+            let mut entries = v.fs.list(&dir)?;
+            // Visit sub-folders in name order (the stack pops the last one first).
+            entries.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase()));
+            for e in entries {
+                scanned += 1;
+                let p = join(&dir, &e.name);
+                if e.is_dir {
+                    dirs.push(p.clone());
+                }
+                if e.name.to_lowercase().contains(&query) {
+                    if found.len() >= max {
+                        truncated = true;
+                        break;
+                    }
+                    found.push((p, e));
+                }
+            }
+            if truncated {
+                break;
+            }
+            if !progress(scanned, 0) {
+                return Err(Error::Cancelled);
+            }
+        }
+        let items = found.iter().map(|(p, e)| {
+            Obj::new().str("path", p).str("name", &e.name).bool("dir", e.is_dir).uint("size", e.size).int("mtime", e.modified).end()
+        });
+        Ok(Obj::new().bool("ok", true).raw("entries", &array(items)).bool("truncated", truncated).uint("scanned", scanned).end())
+    })
 }
 
 fn check(c: &Call, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result<String> {
@@ -864,6 +968,34 @@ mod tests {
         api::close_volume(b);
         let _ = std::fs::remove_file(pa);
         let _ = std::fs::remove_file(pb);
+    }
+
+    #[test]
+    fn backups_open_only_with_their_password() {
+        let pw = [Secret::from_slice(b"backup pass"), Secret::from_slice(b"{\"qscryptBackup\":1}")];
+        let sealed = api2::call_bytes("backup.seal", "{\"password\":0,\"data\":1,\"now\":1700000000}", &pw, &[]).expect("sealed");
+        let back = api2::call_bytes("backup.open", "{\"password\":0,\"data\":1}", &[Secret::from_slice(b"backup pass"), Secret::from_slice(&sealed)], &[]).expect("opened");
+        assert_eq!(back, b"{\"qscryptBackup\":1}");
+        assert!(api2::call_bytes("backup.open", "{\"password\":0,\"data\":1}", &[Secret::from_slice(b"wrong"), Secret::from_slice(&sealed)], &[]).is_none());
+    }
+
+    #[test]
+    fn find_searches_every_folder() {
+        let (p, h) = volume("f.hc", 12, "exfat");
+        for (dir, name) in [("/", "Report 2026.pdf"), ("/a", "report-old.txt"), ("/a/b", "photo.jpg"), ("/a/b", "REPORT final.docx")] {
+            if dir != "/" {
+                let _ = api::mkdir(h, dir);
+            }
+            put(h, &format!("{}/{}", dir.trim_end_matches('/'), name), b"x");
+        }
+        let r = api2::call("fs.find", &format!("{{\"handle\":{h},\"path\":\"/\",\"query\":\"report\"}}"), &[], &[], &mut |_, _| true);
+        assert!(r.contains("\"ok\":true"), "{r}");
+        assert_eq!(r.matches("\"path\"").count(), 3, "{r}");
+        assert!(r.contains("/a/b/REPORT final.docx"), "{r}");
+        let r = api2::call("fs.find", &format!("{{\"handle\":{h},\"path\":\"/a\",\"query\":\"report\",\"max\":1}}"), &[], &[], &mut |_, _| true);
+        assert!(r.contains("\"truncated\":true"), "{r}");
+        api::close_volume(h);
+        let _ = std::fs::remove_file(p);
     }
 
     #[test]

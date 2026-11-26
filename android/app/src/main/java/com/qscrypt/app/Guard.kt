@@ -22,6 +22,7 @@ import kotlinx.coroutines.launch
 class QsApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        Diag.init(this)
         Prefs.init(this)
         Net.init(this)
         AppState.init(this)

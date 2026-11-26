@@ -108,7 +108,7 @@ pub fn call_bytes(method: &str, args: &str, blobs: &[Secret], fds: &[i32]) -> Op
             Some(id.to_bytes().to_vec())
         }
         "volume.readRange" => api::read_range(c.args.get("handle").i64_or(0), c.args.get("path").str_or("/"), c.args.get("offset").u64_or(0), c.args.get("len").u64_or(0) as usize),
-        _ => None,
+        _ => crate::api3::call_bytes(method, &c),
     }
 }
 

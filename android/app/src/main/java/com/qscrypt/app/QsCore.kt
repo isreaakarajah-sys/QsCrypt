@@ -90,7 +90,12 @@ class Call(private val method: String) {
     }
 
     fun run(progress: Progress? = null): Reply = try {
-        Reply(QsCore.call(method, args.toString(), blobs.toTypedArray(), fds.toIntArray(), progress))
+        Reply(QsCore.call(method, args.toString(), blobs.toTypedArray(), fds.toIntArray(), progress)).also { r ->
+            if (!r.ok && r.code !in EXPECTED) Diag.warn("engine", "$method: ${r.code} ${r.message.take(200)}")
+        }
+    } catch (e: Throwable) {
+        Diag.error("engine $method", e)
+        throw e
     } finally {
         blobs.forEach { it.fill(0) }
     }
@@ -101,6 +106,9 @@ class Call(private val method: String) {
         blobs.forEach { it.fill(0) }
     }
 }
+
+/** Engine answers that are part of normal use, not worth a line in the diagnostic log. */
+private val EXPECTED = setOf("wrong_password", "duress", "policy", "cancelled", "exists", "not_found", "invalid_name", "read_only", "online", "expired", "clock", "hidden_protected", "no_space")
 
 /** A USB drive opened by the engine, or one partition of it. */
 data class UsbTarget(val handle: Long, val start: Long, val size: Long, val title: String, val kind: String)

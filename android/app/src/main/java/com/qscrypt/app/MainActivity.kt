@@ -38,7 +38,10 @@ import com.qscrypt.app.ui.ActivationScreen
 import com.qscrypt.app.ui.AttemptsReport
 import com.qscrypt.app.ui.AttemptsScreen
 import com.qscrypt.app.ui.BenchScreen
+import com.qscrypt.app.ui.BackupScreen
 import com.qscrypt.app.ui.CalculatorScreen
+import com.qscrypt.app.ui.DiagScreen
+import com.qscrypt.app.ui.Centered
 import com.qscrypt.app.ui.ContactsScreen
 import com.qscrypt.app.ui.DrivesScreen
 import com.qscrypt.app.ui.GalleryScreen
@@ -57,7 +60,9 @@ import com.qscrypt.app.ui.Qs
 import com.qscrypt.app.ui.QsTheme
 import com.qscrypt.app.ui.SettingsScreen
 import com.qscrypt.app.ui.ShareInScreen
+import com.qscrypt.app.ui.SplashExit
 import com.qscrypt.app.ui.SplashScreen
+import com.qscrypt.app.ui.underSplash
 import com.qscrypt.app.ui.StegoScreen
 import com.qscrypt.app.ui.TwoFactorSetupScreen
 import com.qscrypt.app.ui.UnlockScreen
@@ -120,6 +125,37 @@ class MainActivity : FragmentActivity() {
         runCatching { notifications.launch(Manifest.permission.POST_NOTIFICATIONS) }
     }
 
+    // Anything the app opens itself (file pickers, sharing, the camera, settings
+    // pages) must not lock it on the way back.
+    override fun startActivity(intent: Intent?, options: Bundle?) {
+        AppState.pickerOpen = true
+        try {
+            super.startActivity(intent, options)
+        } catch (e: RuntimeException) {
+            AppState.pickerOpen = false
+            throw e
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun startActivityForResult(intent: Intent, requestCode: Int, options: Bundle?) {
+        AppState.pickerOpen = true
+        try {
+            @Suppress("DEPRECATION")
+            super.startActivityForResult(intent, requestCode, options)
+        } catch (e: RuntimeException) {
+            AppState.pickerOpen = false
+            throw e
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun startIntentSenderForResult(intent: android.content.IntentSender, requestCode: Int, fillInIntent: Intent?, flagsMask: Int, flagsValues: Int, extraFlags: Int, options: Bundle?) {
+        AppState.pickerOpen = true
+        @Suppress("DEPRECATION")
+        super.startIntentSenderForResult(intent, requestCode, fillInIntent, flagsMask, flagsValues, extraFlags, options)
+    }
+
     override fun dispatchTouchEvent(ev: MotionEvent?): Boolean {
         AppState.touched()
         return super.dispatchTouchEvent(ev)
@@ -151,31 +187,41 @@ fun QsApp() {
         }
         // The interface is Arabic: right-to-left whatever the system language.
         CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
-            Box(Modifier.fillMaxSize().background(Qs.base).systemBarsPadding().imePadding()) {
-                val context = LocalContext.current
-                var active by remember { mutableStateOf(Activation.isActive(context)) }
-                var configured by remember { mutableStateOf(Prefs.lockConfigured()) }
-                var lockChosen by remember { mutableStateOf(Prefs.lockMode >= 0 || Prefs.secretKind == SECRET_NONE || !PhoneAuth.available(context)) }
-                LaunchedEffect(Unit) {
-                    if (AppState.selfTest == null) {
-                        AppState.selfTest = withContext(Dispatchers.Default) { runCatching { SelfTest.run() }.getOrNull() }
+            val context = LocalContext.current
+            var active by remember { mutableStateOf(Activation.isActive(context)) }
+            var configured by remember { mutableStateOf(Prefs.lockConfigured()) }
+            var lockChosen by remember { mutableStateOf(Prefs.lockMode >= 0 || Prefs.secretKind == SECRET_NONE || !PhoneAuth.available(context)) }
+            val exit = remember { SplashExit() }
+            LaunchedEffect(Unit) {
+                if (AppState.selfTest == null) {
+                    AppState.selfTest = withContext(Dispatchers.Default) { runCatching { SelfTest.run() }.getOrNull() }
+                }
+            }
+            Box(Modifier.fillMaxSize().background(Qs.base)) {
+                val splashing = active && !AppState.splashDone
+                // The app is composed under the opening screen once its portal starts to open.
+                if (!splashing || exit.revealing) {
+                    Box(Modifier.fillMaxSize().underSplash(exit, splashing).systemBarsPadding().imePadding()) {
+                        when {
+                            // The Hacen fonts are sealed with the activation password, so on the
+                            // very first launch activation comes first: the opening screen then
+                            // always appears in the app's own fonts.
+                            !active -> Centered { ActivationScreen(onDone = { active = true }) }
+                            !configured -> Centered {
+                                LockSetupScreen(onDone = {
+                                    configured = true
+                                    lockChosen = Prefs.lockMode >= 0 || Prefs.secretKind == SECRET_NONE || !PhoneAuth.available(context)
+                                    AppState.locked = false
+                                })
+                            }
+                            !lockChosen -> Centered { TwoFactorSetupScreen(onDone = { lockChosen = true }) }
+                            AppState.locked -> Centered { LockScreen(onReset = { configured = Prefs.lockConfigured() }) }
+                            else -> Router()
+                        }
                     }
                 }
-                when {
-                    // The Hacen fonts are sealed with the activation password, so on the
-                    // very first launch activation comes first: the opening screen then
-                    // always appears in the app's own fonts.
-                    !active -> ActivationScreen(onDone = { active = true })
-                    !AppState.splashDone -> SplashScreen(onDone = { AppState.splashDone = true })
-                    !configured -> LockSetupScreen(onDone = {
-                        configured = true
-                        lockChosen = Prefs.lockMode >= 0 || Prefs.secretKind == SECRET_NONE || !PhoneAuth.available(context)
-                        AppState.locked = false
-                    })
-                    !lockChosen -> TwoFactorSetupScreen(onDone = { lockChosen = true })
-                    AppState.locked -> LockScreen(onReset = { configured = Prefs.lockConfigured() })
-                    else -> Router()
-                }
+                // Edge to edge: the portal opens over the whole screen.
+                if (splashing) SplashScreen(exit, onDone = { AppState.splashDone = true })
             }
         }
     }
@@ -190,6 +236,16 @@ private fun Router() {
         if (AppState.shared.isNotEmpty() && AppState.top != Screen.ShareIn) AppState.push(Screen.ShareIn)
     }
     key(screen) {
+        // Viewers use the whole screen; everything else keeps a comfortable width on tablets.
+        val fullScreen = screen is Screen.Viewer || screen is Screen.Gallery || screen is Screen.Media || screen is Screen.Pdf
+        if (fullScreen) Screens(screen) else Centered { Screens(screen) }
+    }
+    AttemptsReport()
+}
+
+@Composable
+private fun Screens(screen: Screen) {
+    run {
         when (screen) {
             Screen.Home -> HomeScreen()
             Screen.Drives -> DrivesScreen()
@@ -211,8 +267,9 @@ private fun Router() {
             Screen.Bench -> BenchScreen()
             Screen.Message -> MessageScreen()
             Screen.Attempts -> AttemptsScreen()
+            Screen.Diag -> DiagScreen()
+            Screen.Backup -> BackupScreen()
             Screen.ShareIn -> ShareInScreen()
         }
     }
-    AttemptsReport()
 }

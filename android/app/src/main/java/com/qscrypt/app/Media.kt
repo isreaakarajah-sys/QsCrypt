@@ -62,6 +62,8 @@ object Thumbs {
 
     fun cached(handle: Long, path: String): ImageBitmap? = cache.get("$handle:$path")
 
+    fun clearAll() = cache.evictAll()
+
     /** Two pictures at a time: a folder of large photos must not fill the memory. */
     private val gate = java.util.concurrent.Semaphore(2)
 

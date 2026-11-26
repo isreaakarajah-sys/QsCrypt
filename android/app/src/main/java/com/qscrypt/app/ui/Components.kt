@@ -2,6 +2,7 @@ package com.qscrypt.app.ui
 
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -11,6 +12,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -37,6 +41,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -149,6 +154,48 @@ fun PrimaryButton(text: String, modifier: Modifier = Modifier.fillMaxWidth(), @D
     }
 }
 
+/**
+ * Text drawn from outlines in the app's own fonts (see android/tools/text_art.py),
+ * for the screens shown before activation unlocks the fonts.
+ */
+@Composable
+fun Art(@DrawableRes id: Int, description: String?, color: Color, modifier: Modifier = Modifier) =
+    Image(painterResource(id), contentDescription = description, colorFilter = ColorFilter.tint(color), modifier = modifier)
+
+/** [PrimaryButton] whose label is drawn with [Art]. */
+@Composable
+fun PrimaryArtButton(@DrawableRes art: Int, description: String, modifier: Modifier = Modifier.fillMaxWidth(), @DrawableRes icon: Int? = null, enabled: Boolean = true, onClick: () -> Unit) {
+    Row(
+        modifier = modifier
+            .height(56.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(if (enabled) Qs.brass else Qs.surface2)
+            .clickable(enabled = enabled, onClickLabel = description, onClick = onClick),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        val fg = if (enabled) Qs.base else Qs.muted
+        if (icon != null) {
+            QsIcon(icon, fg, 20.dp)
+            Spacer(Modifier.width(10.dp))
+        }
+        Art(art, description, fg)
+    }
+}
+
+/** [Note] whose text is drawn with [Art]. */
+@Composable
+fun ArtNote(@DrawableRes art: Int, description: String, @DrawableRes icon: Int = R.drawable.ic_shield, color: Color = Qs.brass) {
+    val shape = RoundedCornerShape(16.dp)
+    Row(
+        Modifier.fillMaxWidth().clip(shape).border(1.dp, Qs.line, shape).padding(horizontal = 14.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(Modifier.padding(top = 4.dp)) { QsIcon(icon, color, 18.dp) }
+        Box(Modifier.weight(1f)) { Art(art, description, Qs.muted) }
+    }
+}
+
 @Composable
 fun SecondaryButton(text: String, modifier: Modifier = Modifier.fillMaxWidth(), @DrawableRes icon: Int? = null, enabled: Boolean = true, color: Color = Qs.ivory, onClick: () -> Unit) {
     val shape = RoundedCornerShape(18.dp)
@@ -241,6 +288,7 @@ fun QsField(
     textStyle: TextStyle = T.body.copy(fontSize = 16.sp),
     leading: @Composable (() -> Unit)? = null,
     trailing: @Composable (() -> Unit)? = null,
+    placeholderContent: @Composable (() -> Unit)? = null,
 ) {
     val shape = RoundedCornerShape(16.dp)
     var shown by remember { mutableStateOf(false) }
@@ -270,7 +318,9 @@ fun QsField(
                     Spacer(Modifier.width(10.dp))
                 }
                 Box(Modifier.weight(1f)) {
-                    if (value.isEmpty()) Text(placeholder, style = T.body.copy(color = Qs.muted, fontSize = 15.sp))
+                    if (value.isEmpty()) {
+                        if (placeholderContent != null) placeholderContent() else Text(placeholder, style = T.body.copy(color = Qs.muted, fontSize = 15.sp))
+                    }
                     inner()
                 }
                 if (password) {
@@ -400,3 +450,14 @@ fun ComingSoonTag() = Tag("قريباً", TagKind.Outline)
 
 @Composable
 fun Gap(h: Dp) = Spacer(Modifier.height(h))
+
+/**
+ * On wide screens (tablets, foldables, a phone on its side) a screen keeps a
+ * comfortable reading width in the middle instead of stretching edge to edge.
+ */
+@Composable
+fun Centered(maxWidth: Dp = 680.dp, content: @Composable () -> Unit) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+        Box(Modifier.fillMaxHeight().widthIn(max = maxWidth).fillMaxWidth()) { content() }
+    }
+}

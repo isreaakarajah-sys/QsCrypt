@@ -56,6 +56,9 @@ import androidx.fragment.app.FragmentActivity
 import com.qscrypt.app.AppState
 import com.qscrypt.app.PhoneAuth
 import com.qscrypt.app.Prefs
+import com.qscrypt.app.Profile
+import com.qscrypt.app.CODE_WRONG
+import com.qscrypt.app.CODE_DURESS
 import com.qscrypt.app.R
 import com.qscrypt.app.SECRET_NONE
 import com.qscrypt.app.SECRET_PATTERN
@@ -285,33 +288,40 @@ private fun PatternLayout(title: String, subtitle: String, error: Boolean, busy:
     }
 }
 
-/** First launch: create the app PIN (entered twice). */
+/** First launch: create the app PIN (entered twice). With [duress], the duress code instead. */
 @Composable
-fun PinSetupScreen(onDone: () -> Unit) {
+fun PinSetupScreen(onDone: () -> Unit, duress: Boolean = false, onCancel: (() -> Unit)? = null) {
     var first by remember { mutableStateOf<String?>(null) }
     var pin by remember { mutableStateOf("") }
     var error by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var info by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    var sameAsMain by remember { mutableStateOf(false) }
     val subtitle = when {
+        sameAsMain -> "رمز الطوارئ يجب أن يختلف عن رمز التطبيق"
         error -> "الرمزان غير متطابقين. أعد المحاولة"
+        first == null && duress -> "رمز ثانٍ من $PIN_LENGTH أرقام يفتح التطبيق فارغاً"
         first == null -> "اختر رمزاً من $PIN_LENGTH أرقام لقفل التطبيق"
         else -> "أعد إدخال الرمز للتأكيد"
     }
     PinLayout(
-        title = if (first == null) "رمز QsCrypt" else "تأكيد الرمز",
+        title = if (first == null) (if (duress) "رمز الطوارئ" else "رمز QsCrypt") else "تأكيد الرمز",
         subtitle = subtitle,
         pin = pin,
-        error = error,
+        error = error || sameAsMain,
         busy = busy,
         padEnabled = true,
         footer = {
-            Text("لماذا الرمز السري؟", style = T.label.copy(color = Qs.brass), modifier = Modifier.clickable { info = true }.padding(8.dp))
+            Text(if (duress) "ما هو رمز الطوارئ؟" else "لماذا الرمز السري؟", style = T.label.copy(color = Qs.brass), modifier = Modifier.clickable { info = true }.padding(8.dp))
+            if (onCancel != null) {
+                Text("إلغاء", style = T.label.copy(color = Qs.muted), modifier = Modifier.clickable(onClick = onCancel).padding(8.dp))
+            }
         },
         onDigit = { d ->
             if (pin.length >= PIN_LENGTH) return@PinLayout
             error = false
+            sameAsMain = false
             pin += d
             if (pin.length == PIN_LENGTH) {
                 val f = first
@@ -321,10 +331,14 @@ fun PinSetupScreen(onDone: () -> Unit) {
                 } else if (f == pin) {
                     busy = true
                     scope.launch {
-                        val ok = withContext(Dispatchers.Default) { Prefs.setSecret(SECRET_PIN, pin) }
+                        val code = pin
+                        val clash = duress && withContext(Dispatchers.Default) { Prefs.checkPin(code) }
+                        val ok = !clash && withContext(Dispatchers.Default) { if (duress) Prefs.setDuress(code) else Prefs.setSecret(SECRET_PIN, code) }
                         busy = false
                         if (ok) onDone() else {
-                            error = true
+                            sameAsMain = clash
+                            error = !clash
+                            first = null
                             pin = ""
                         }
                     }
@@ -340,8 +354,8 @@ fun PinSetupScreen(onDone: () -> Unit) {
     )
     if (info) {
         QsAlert(
-            title = "قفل التطبيق",
-            text = "الرمز يمنع أي شخص يمسك جوالك من رؤية قائمة خزناتك أو فتح ما هو مفتوح منها. هو لا يغني عن كلمة مرور كل حاوية، ولا يُخزَّن إلا كبصمة مشتقّة منه.",
+            title = if (duress) "رمز الطوارئ" else "قفل التطبيق",
+            text = if (duress) DURESS_INFO else "الرمز يمنع أي شخص يمسك جوالك من رؤية قائمة خزناتك أو فتح ما هو مفتوح منها. هو لا يغني عن كلمة مرور كل حاوية، ولا يُخزَّن إلا كبصمة مشتقّة منه.",
             confirm = "فهمت",
             dismiss = null,
             onConfirm = { info = false },
@@ -350,17 +364,20 @@ fun PinSetupScreen(onDone: () -> Unit) {
     }
 }
 
-/** Create the app pattern (drawn twice). */
+/** What the duress code does, shown where it is set. */
+const val DURESS_INFO = "إذا أُجبرت على فتح التطبيق، أدخل رمز الطوارئ بدل رمزك: يفتح QsCrypt فارغاً كأنه مثبّت للتو، بلا خزنات ولا جهات اتصال ولا سجلات. بياناتك الحقيقية تبقى كما هي ولا يظهر منها شيء، وتعود إليها عند الفتح برمزك الحقيقي."
+
+/** Create the app pattern (drawn twice). With [duress], the duress pattern instead. */
 @Composable
-fun PatternSetupScreen(onDone: () -> Unit, onCancel: (() -> Unit)? = null) {
+fun PatternSetupScreen(onDone: () -> Unit, onCancel: (() -> Unit)? = null, duress: Boolean = false) {
     var first by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var clearKey by remember { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
     PatternLayout(
-        title = if (first == null) "نمط QsCrypt" else "تأكيد النمط",
-        subtitle = error ?: if (first == null) "صِل $PATTERN_MIN نقاط على الأقل دون رفع إصبعك" else "ارسم النمط نفسه مرة أخرى",
+        title = if (first == null) (if (duress) "نمط الطوارئ" else "نمط QsCrypt") else "تأكيد النمط",
+        subtitle = error ?: if (first == null) (if (duress) "نمط ثانٍ يفتح التطبيق فارغاً، مختلف عن نمطك" else "صِل $PATTERN_MIN نقاط على الأقل دون رفع إصبعك") else "ارسم النمط نفسه مرة أخرى",
         error = error != null,
         busy = busy,
         enabled = true,
@@ -390,10 +407,11 @@ fun PatternSetupScreen(onDone: () -> Unit, onCancel: (() -> Unit)? = null) {
                 first == p -> {
                     busy = true
                     scope.launch {
-                        val ok = withContext(Dispatchers.Default) { Prefs.setSecret(SECRET_PATTERN, p) }
+                        val clash = duress && withContext(Dispatchers.Default) { Prefs.checkPin(p) }
+                        val ok = !clash && withContext(Dispatchers.Default) { if (duress) Prefs.setDuress(p) else Prefs.setSecret(SECRET_PATTERN, p) }
                         busy = false
                         if (ok) onDone() else {
-                            error = "تعذّر الحفظ"
+                            error = if (clash) "نمط الطوارئ يجب أن يختلف عن نمط التطبيق" else "تعذّر الحفظ"
                             first = null
                             clearKey++
                         }
@@ -516,17 +534,26 @@ fun LockScreen(onReset: () -> Unit = {}) {
         val a = activity ?: return
         phoneError = null
         PhoneAuth.prompt(a, "QsCrypt", if (secondStep) "الخطوة الثانية: قفل الهاتف" else "افتح بقفل الهاتف") { ok, msg ->
-            if (ok) noteUnlocked() else phoneError = msg ?: "لم يتم التأكيد"
+            if (ok) {
+                // The phone's lock alone always opens the real profile; as a second
+                // step it keeps the profile the code chose.
+                if (!secondStep) Profile.enter(false)
+                noteUnlocked()
+            } else {
+                phoneError = msg ?: "لم يتم التأكيد"
+            }
         }
     }
 
     fun check(attempt: String) {
         busy = true
         scope.launch {
-            val ok = withContext(Dispatchers.Default) { Prefs.checkPin(attempt) }
+            val which = withContext(Dispatchers.Default) { Prefs.whichCode(attempt) }
+            val ok = which != CODE_WRONG
             busy = false
             pin = ""
             if (ok) {
+                Profile.enter(which == CODE_DURESS)
                 if (mode == PhoneAuth.Mode.TwoFactor) {
                     Prefs.failCount = 0
                     secondStep = true
@@ -552,8 +579,9 @@ fun LockScreen(onReset: () -> Unit = {}) {
         }
         now = System.currentTimeMillis()
     }
-    LaunchedEffect(Unit) {
-        if ((mode == PhoneAuth.Mode.Either || mode == PhoneAuth.Mode.PhoneOnly) && Prefs.lockUntil <= System.currentTimeMillis() && PhoneAuth.available(context)) askPhone()
+    // Waits for the opening screen's portal to finish, so the system prompt does not cover it.
+    LaunchedEffect(AppState.splashDone) {
+        if (AppState.splashDone && (mode == PhoneAuth.Mode.Either || mode == PhoneAuth.Mode.PhoneOnly) && Prefs.lockUntil <= System.currentTimeMillis() && PhoneAuth.available(context)) askPhone()
     }
 
     if (mode == PhoneAuth.Mode.PhoneOnly) {
@@ -789,7 +817,7 @@ fun VerifyLockDialog(onVerified: () -> Unit, onDismiss: () -> Unit) {
     }
     fun attempt(s: String) {
         scope.launch {
-            val ok = withContext(Dispatchers.Default) { Prefs.checkPin(s) }
+            val ok = withContext(Dispatchers.Default) { Prefs.checkOwnCode(s) }
             if (ok) onVerified() else {
                 wrong = true
                 Prefs.logAttempt("app")

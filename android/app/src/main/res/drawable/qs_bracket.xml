@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Verse bracket "(" for the opening screen, brass; mirrored for the closing side. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="10dp"
+    android:height="30dp"
+    android:viewportWidth="100.0"
+    android:viewportHeight="300.0">
+    <group
+        android:translateX="7.0"
+        android:translateY="0.0">
+        <path
+            android:fillColor="#FFC9A24A"
+            android:pathData="M 80 10 C 6 74 6 226 80 290 C 43 224 43 76 80 10 Z M 14 128 L 30 150 L 14 172 L -2 150 Z M 72 10 A 8 8 0 1 0 88 10 A 8 8 0 1 0 72 10 Z M 72 290 A 8 8 0 1 0 88 290 A 8 8 0 1 0 72 290 Z" />
+    </group>
+</vector>

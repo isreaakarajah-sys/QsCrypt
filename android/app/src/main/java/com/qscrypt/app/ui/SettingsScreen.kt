@@ -54,6 +54,7 @@ import com.qscrypt.app.SECRET_PATTERN
 import com.qscrypt.app.SECRET_PIN
 import com.qscrypt.app.PhoneAuth
 import com.qscrypt.app.Prefs
+import com.qscrypt.app.Profile
 import com.qscrypt.app.QsCore
 import com.qscrypt.app.R
 import com.qscrypt.app.Screen
@@ -154,6 +155,12 @@ fun SettingsScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var autoLock by remember { mutableLongStateOf(Prefs.autoLockMs) }
+    var lockOnLeave by remember { mutableStateOf(Prefs.lockOnLeave) }
+    var duress by remember { mutableStateOf(Prefs.hasDuress()) }
+    var verifyDuress by remember { mutableStateOf(false) }
+    var settingDuress by remember { mutableStateOf(false) }
+    var askRemoveDuress by remember { mutableStateOf(false) }
+    val decoy = Profile.decoy
     var closeOnLock by remember { mutableStateOf(Prefs.closeVaultsOnLock) }
     var screenOff by remember { mutableStateOf(Prefs.closeOnScreenOff) }
     var idle by remember { mutableIntStateOf(Prefs.idleCloseMinutes) }
@@ -177,6 +184,16 @@ fun SettingsScreen() {
         disguised = Prefs.disguised
     }
 
+    if (settingDuress) {
+        val saved = {
+            settingDuress = false
+            duress = Prefs.hasDuress()
+            Toast.makeText(context, "تم حفظ رمز الطوارئ", Toast.LENGTH_SHORT).show()
+        }
+        if (secret == SECRET_PATTERN) PatternSetupScreen(onDone = saved, onCancel = { settingDuress = false }, duress = true)
+        else PinSetupScreen(onDone = saved, duress = true, onCancel = { settingDuress = false })
+        return
+    }
     when (setting) {
         SECRET_PIN -> {
             PinSetupScreen(onDone = {
@@ -211,16 +228,21 @@ fun SettingsScreen() {
                     else -> "رمز من 6 أرقام"
                 }) {
                     androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Chip(if (secret == SECRET_PIN) "تغيير الرمز" else "رمز", secret == SECRET_PIN) { verifyFor = SECRET_PIN }
-                        Chip(if (secret == SECRET_PATTERN) "تغيير النمط" else "نمط", secret == SECRET_PATTERN) { verifyFor = SECRET_PATTERN }
-                        Chip("بلا رمز (البصمة فقط)", secret == SECRET_NONE, enabled = phoneAuth && secret != SECRET_NONE) { verifyFor = SECRET_NONE }
+                        if (decoy) {
+                            // The decoy profile can only change its own code (the duress code).
+                            Chip(if (secret == SECRET_PATTERN) "تغيير النمط" else "تغيير الرمز", true) { verifyFor = secret }
+                        } else {
+                            Chip(if (secret == SECRET_PIN) "تغيير الرمز" else "رمز", secret == SECRET_PIN) { verifyFor = SECRET_PIN }
+                            Chip(if (secret == SECRET_PATTERN) "تغيير النمط" else "نمط", secret == SECRET_PATTERN) { verifyFor = SECRET_PATTERN }
+                            Chip("بلا رمز (البصمة فقط)", secret == SECRET_NONE, enabled = phoneAuth && secret != SECRET_NONE) { verifyFor = SECRET_NONE }
+                        }
                     }
                     if (secret == SECRET_NONE) {
                         Gap(6.dp)
                         Text("يفتح التطبيق بقفل الهاتف وحده. وضع التمويه يحتاج رمزاً أو نمطاً.", style = T.small)
                     }
                 }
-                if (secret != SECRET_NONE) {
+                if (secret != SECRET_NONE && !decoy) {
                     ChoiceBlock(R.drawable.ic_finger, "قفل الهاتف", if (phoneAuth) "البصمة أو الوجه أو قفل الهاتف" else "لا يوجد قفل شاشة على هذا الهاتف") {
                         val w = secretWord()
                         androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -258,18 +280,46 @@ fun SettingsScreen() {
                         )
                     }
                 }
+                if (!decoy) {
+                    SettingRow(
+                        R.drawable.ic_shield,
+                        "رمز الطوارئ",
+                        when {
+                            secret == SECRET_NONE -> "يحتاج رمزاً أو نمطاً للتطبيق"
+                            duress -> "مفعّل: يفتح التطبيق فارغاً كأنه جديد"
+                            else -> "${if (secret == SECRET_PATTERN) "نمط" else "رمز"} ثانٍ يفتح التطبيق فارغاً إذا أُجبرت على فتحه"
+                        },
+                    ) {
+                        if (duress) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Pill("تغيير", Qs.brass) { verifyDuress = true }
+                                Pill("إزالة", Qs.coral) { askRemoveDuress = true }
+                            }
+                        } else {
+                            Pill("تفعيل", Qs.brass, enabled = secret != SECRET_NONE) { verifyDuress = true }
+                        }
+                    }
+                }
                 SettingRow(R.drawable.ic_lock, "أقفل التطبيق الآن", onClick = { AppState.lock() })
-                ChoiceBlock(R.drawable.ic_clock, "القفل التلقائي", "بعد مغادرة التطبيق") {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        AUTOLOCK.forEach { (ms, label) ->
-                            Chip(label, autoLock == ms) {
-                                autoLock = ms
-                                Prefs.autoLockMs = ms
+                SettingRow(R.drawable.ic_clock, "القفل عند مغادرة التطبيق", if (lockOnLeave) "عند الرجوع للتطبيق يُطلب القفل من جديد" else "متوقف: الرجوع للتطبيق لا يقفله") {
+                    QsSwitch(lockOnLeave) { on ->
+                        lockOnLeave = on
+                        Prefs.lockOnLeave = on
+                    }
+                }
+                if (lockOnLeave) {
+                    ChoiceBlock(R.drawable.ic_clock, "متى يُقفل", "بعد مغادرة التطبيق بـ") {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            AUTOLOCK.forEach { (ms, label) ->
+                                Chip(label, autoLock == ms) {
+                                    autoLock = ms
+                                    Prefs.autoLockMs = ms
+                                }
                             }
                         }
                     }
                 }
-                SettingRow(R.drawable.ic_sliders, "وضع التمويه", if (secret == SECRET_NONE) "يحتاج رمزاً أو نمطاً" else "يظهر التطبيق كآلة حاسبة تعمل") {
+                if (!decoy) SettingRow(R.drawable.ic_sliders, "وضع التمويه", if (secret == SECRET_NONE) "يحتاج رمزاً أو نمطاً" else "يظهر التطبيق كآلة حاسبة تعمل") {
                     QsSwitch(disguised, enabled = secret != SECRET_NONE || disguised) { on ->
                         if (on) {
                             askDisguise = true
@@ -367,6 +417,8 @@ fun SettingsScreen() {
             }
             Section("التطبيق") {
                 SettingRow(R.drawable.ic_share, "شارك التطبيق", "أرسله لصديق عبر البلوتوث أو المشاركة القريبة", onClick = { shareApk(context) })
+                SettingRow(R.drawable.ic_archive, "النسخة الاحتياطية المشفّرة", "الهوية وجهات الاتصال وقائمة الخزنات، بكلمة مرور", onClick = { AppState.push(Screen.Backup) })
+                SettingRow(R.drawable.ic_doc, "سجل التشخيص", "الأعطال والأخطاء، لإرسالها للمطوّر عند الحاجة", onClick = { AppState.push(Screen.Diag) })
                 SettingRow(R.drawable.ic_info, "حول QsCrypt", "الإصدار ${appVersion(context)}", onClick = { AppState.push(Screen.About) })
             }
             Gap(24.dp)
@@ -374,6 +426,29 @@ fun SettingsScreen() {
         BottomNav(Screen.Settings)
     }
 
+    if (verifyDuress) {
+        VerifyLockDialog(
+            onVerified = {
+                verifyDuress = false
+                settingDuress = true
+            },
+            onDismiss = { verifyDuress = false },
+        )
+    }
+    if (askRemoveDuress) {
+        QsAlert(
+            "إزالة رمز الطوارئ",
+            "لن يفتح أي رمز بعد الآن التطبيق فارغاً. ما حُفظ في الوضع الفارغ يبقى محفوظاً إن أعدت تفعيله.",
+            "إزالة",
+            onConfirm = {
+                askRemoveDuress = false
+                Prefs.clearDuress()
+                duress = false
+            },
+            onDismiss = { askRemoveDuress = false },
+            danger = true,
+        )
+    }
     if (verifyFor >= 0) {
         val target = verifyFor
         VerifyLockDialog(

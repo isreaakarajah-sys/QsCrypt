@@ -49,7 +49,7 @@ object Vaulted {
 
 /** The user's own QsCrypt identity (what contacts encrypt to). */
 object Identity {
-    private fun file(context: Context) = File(context.filesDir, "identity.bin")
+    private fun file(context: Context) = File(context.filesDir, if (Profile.decoy) "identity_decoy.bin" else "identity.bin")
 
     fun exists(context: Context) = file(context).exists()
 
@@ -85,11 +85,20 @@ object Identity {
     fun delete(context: Context) {
         file(context).delete()
     }
+
+    /** Replaces the identity with secret bytes from a backup (checked by the engine first). */
+    fun restore(context: Context, secret: ByteArray): Boolean {
+        val check = Call("id.public").blob("identity", secret.copyOf()).run()
+        if (!check.ok) return false
+        val sealed = Vaulted.seal(secret) ?: return false
+        file(context).writeBytes(sealed)
+        return true
+    }
 }
 
 /** File keys of "auto-open" QsCrypt files, wrapped by the device key. */
 object FileKeys {
-    private fun prefs(context: Context) = context.getSharedPreferences("qscrypt_filekeys", Context.MODE_PRIVATE)
+    private fun prefs(context: Context) = context.getSharedPreferences(Profile.name("qscrypt_filekeys"), Context.MODE_PRIVATE)
 
     fun put(context: Context, fileId: String, keyHex: String) {
         val raw = keyHex.chunked(2).mapNotNull { it.toIntOrNull(16)?.toByte() }.toByteArray()
@@ -108,4 +117,14 @@ object FileKeys {
     fun forget(context: Context, fileId: String) = prefs(context).edit().remove(fileId).apply()
 
     fun has(context: Context, fileId: String): Boolean = fileId.isNotEmpty() && prefs(context).contains(fileId)
+
+    /** Every remembered file id (for the encrypted backup). */
+    fun ids(context: Context): Set<String> = prefs(context).all.keys
+
+    /** Stores raw key bytes (from a backup). */
+    fun putRaw(context: Context, fileId: String, raw: ByteArray) {
+        if (raw.size != 32) return
+        val sealed = Vaulted.seal(raw) ?: return
+        prefs(context).edit().putString(fileId, Base64.encodeToString(sealed, Base64.NO_WRAP)).apply()
+    }
 }

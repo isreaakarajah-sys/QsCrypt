@@ -65,6 +65,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qscrypt.app.AppState
+import com.qscrypt.app.Call
 import com.qscrypt.app.Clip
 import com.qscrypt.app.Entry
 import com.qscrypt.app.Fill
@@ -83,6 +84,7 @@ import com.qscrypt.app.VolumeInfo
 import com.qscrypt.app.humanSize
 import com.qscrypt.app.parseEntries
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Calendar
@@ -163,6 +165,11 @@ fun VaultScreen(handle: Long, path: String) {
     var refresh by remember { mutableIntStateOf(0) }
     var tools by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
+    var sortBy by remember { mutableIntStateOf(Prefs.sortBy) }
+    var sortDesc by remember { mutableStateOf(Prefs.sortDesc) }
+    var deep by remember { mutableStateOf(true) }
+    var found by remember { mutableStateOf<List<Found>?>(null) }
+    var foundMore by remember { mutableStateOf(false) }
     var filter by remember { mutableIntStateOf(0) }
     var newFolder by remember { mutableStateOf(false) }
     var renameFor by remember { mutableStateOf<Entry?>(null) }
@@ -233,11 +240,32 @@ fun VaultScreen(handle: Long, path: String) {
         }
     }
 
-    fun open(e: Entry) {
-        val p = childPath(path, e.name)
+    // Searching every folder below this one (engine walk, after a short pause in typing).
+    LaunchedEffect(query, deep, path, refresh) {
+        found = null
+        foundMore = false
+        if (!deep || query.isBlank()) return@LaunchedEffect
+        delay(300)
+        val r = withContext(Dispatchers.IO) { Call("fs.find").put("handle", handle).put("path", path).put("query", query.trim()).put("max", 500).run() }
+        if (r.ok) {
+            val arr = r.json.optJSONArray("entries") ?: org.json.JSONArray()
+            found = (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                Found(o.optString("path"), Entry(o.optString("name"), o.optBoolean("dir"), o.optLong("size"), o.optLong("mtime")))
+            }
+            foundMore = r.json.optBoolean("truncated")
+        } else {
+            found = emptyList()
+        }
+    }
+
+    fun open(e: Entry) = openAt(path, e)
+
+    fun openAt(dir: String, e: Entry) {
+        val p = childPath(dir, e.name)
         when {
             e.dir -> AppState.push(Screen.Vault(handle, p))
-            isImage(e.name) -> AppState.push(Screen.Gallery(handle, path, e.name))
+            isImage(e.name) -> AppState.push(Screen.Gallery(handle, dir, e.name))
             isVideo(e.name) || isAudio(e.name) -> AppState.push(Screen.Media(handle, p, e.name, e.size))
             isPdf(e.name) -> AppState.push(Screen.Pdf(handle, p, e.name, e.size))
             isText(e.name) -> AppState.push(Screen.Viewer(handle, p, e.name, e.size))
@@ -281,15 +309,16 @@ fun VaultScreen(handle: Long, path: String) {
     }
 
     val all = entries ?: emptyList()
-    val shown = all.filter { e ->
-        (query.isBlank() || e.name.contains(query, ignoreCase = true)) &&
-            when (filter) {
-                1 -> e.dir || isImage(e.name)
-                2 -> e.dir || ext(e.name) in DOCS
-                3 -> e.dir || isVideo(e.name) || isAudio(e.name)
-                else -> true
-            }
+    fun kindOk(e: Entry) = when (filter) {
+        1 -> e.dir || isImage(e.name)
+        2 -> e.dir || ext(e.name) in DOCS
+        3 -> e.dir || isVideo(e.name) || isAudio(e.name)
+        else -> true
     }
+    val order = remember(sortBy, sortDesc) { entryOrder(sortBy, sortDesc) }
+    val shown = all.filter { e -> (query.isBlank() || e.name.contains(query, ignoreCase = true)) && kindOk(e) }.sortedWith(order)
+    val searchingAll = deep && query.isNotBlank()
+    val foundShown = found?.filter { kindOk(it.entry) }?.sortedWith(compareBy<Found> { !it.entry.dir }.thenComparator { a, b -> order.compare(a.entry, b.entry) })
     val used = (info.total - info.free).coerceAtLeast(0)
     val fileCount = all.count { !it.dir }
     val title = if (path == "/") session.container.name.substringBeforeLast('.').ifBlank { session.container.name } else path.substringAfterLast('/')
@@ -409,8 +438,49 @@ fun VaultScreen(handle: Long, path: String) {
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf("الكل", "صور", "مستندات", "فيديو وصوت").forEachIndexed { i, label -> Chip(label, filter == i) { filter = i } }
             }
+            Gap(8.dp)
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (query.isNotBlank()) {
+                    Chip("كل المجلدات الفرعية", deep) { deep = true }
+                    Chip("هذا المجلد فقط", !deep) { deep = false }
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text("ترتيب:", style = T.small)
+                listOf("الاسم", "التاريخ", "الحجم").forEachIndexed { i, label ->
+                    val arrow = if (sortBy == i) (if (sortDesc) " ↓" else " ↑") else ""
+                    Chip(label + arrow, sortBy == i) {
+                        if (sortBy == i) sortDesc = !sortDesc else {
+                            sortBy = i
+                            // Dates and sizes are most useful newest / largest first.
+                            sortDesc = i != 0
+                        }
+                        Prefs.sortBy = sortBy
+                        Prefs.sortDesc = sortDesc
+                    }
+                }
+            }
             Gap(10.dp)
             when {
+                searchingAll -> when {
+                    foundShown == null -> Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = Qs.brass, strokeWidth = 2.dp)
+                    }
+                    foundShown.isEmpty() -> Column(Modifier.fillMaxWidth().padding(vertical = 40.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        QsIcon(R.drawable.ic_search, Qs.muted, 40.dp)
+                        Gap(12.dp)
+                        Text("لا نتائج في هذا المجلد وما تحته", style = T.item.copy(color = Qs.muted))
+                    }
+                    else -> LazyColumn(Modifier.fillMaxWidth()) {
+                        item {
+                            Text("${foundShown.size}${if (foundMore) "+" else ""} نتيجة", style = T.small)
+                            Gap(6.dp)
+                        }
+                        items(foundShown, key = { it.path }) { f ->
+                            FoundRow(f, path) { openAt(f.path.substringBeforeLast('/').ifEmpty { "/" }, f.entry) }
+                        }
+                        item { Gap(16.dp) }
+                    }
+                }
                 error != null -> Note(error!!, icon = R.drawable.ic_alert, color = Qs.coral, background = Qs.warm, border = Qs.coral)
                 entries == null -> Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = Qs.brass, strokeWidth = 2.dp)
@@ -792,4 +862,52 @@ fun ViewerScreen(handle: Long, path: String, name: String, size: Long) {
     }
     busy?.let { b -> ProgressDialog(b.title, b.fraction, b.detail, onCancel = { cancel.set(true) }) }
     message?.let { m -> QsAlert("QsCrypt", m, "حسناً", { message = null }, { message = null }, dismiss = null) }
+}
+
+
+/** A search hit somewhere below the folder being viewed. */
+data class Found(val path: String, val entry: Entry)
+
+/** Folders first, then by name, date or size. */
+fun entryOrder(by: Int, desc: Boolean): Comparator<Entry> {
+    val collator = java.text.Collator.getInstance(java.util.Locale("ar")).apply { strength = java.text.Collator.SECONDARY }
+    val byName = Comparator<Entry> { a, b -> collator.compare(a.name, b.name) }
+    val key: Comparator<Entry> = when (by) {
+        1 -> compareBy<Entry> { it.mtime }.then(byName)
+        2 -> compareBy<Entry> { if (it.dir) 0L else it.size }.then(byName)
+        else -> byName
+    }
+    val ordered = if (desc) key.reversed() else key
+    return compareBy<Entry> { !it.dir }.then(ordered)
+}
+
+@Composable
+private fun FoundRow(f: Found, from: String, onOpen: () -> Unit) {
+    val e = f.entry
+    val parent = f.path.substringBeforeLast('/').ifEmpty { "/" }
+    val where = if (from != "/" && parent.startsWith(from)) parent.removePrefix(from).ifEmpty { "/" } else parent
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Tile(
+            when {
+                e.dir -> R.drawable.ic_folder
+                isImage(e.name) -> R.drawable.ic_image
+                isVideo(e.name) -> R.drawable.ic_video
+                isAudio(e.name) -> R.drawable.ic_music
+                else -> R.drawable.ic_file
+            },
+            if (e.dir) Qs.brass else Qs.ivory,
+            size = 40.dp,
+            radius = 12.dp,
+            iconSize = 20.dp,
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(e.name, style = T.item, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(where, style = T.mono, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (!e.dir) Text(humanSize(e.size), style = T.small)
+    }
 }

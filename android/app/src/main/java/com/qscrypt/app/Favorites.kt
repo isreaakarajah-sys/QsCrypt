@@ -22,12 +22,13 @@ import javax.crypto.spec.GCMParameterSpec
  * use, and that is destroyed when a new fingerprint is enrolled.
  */
 object Favorites {
-    private const val ALIAS = "qscrypt_favorites_key"
+    /** One Keystore key per profile, so forgetting all in one never touches the other. */
+    private val ALIAS: String get() = Profile.name("qscrypt_favorites_key")
 
     /** What a favourite remembers. Wipe `password` after use. */
     class Secret(val password: ByteArray, val pim: Int, val keyfiles: List<String>, val unlock: String)
 
-    private fun prefs(context: Context) = context.getSharedPreferences("qscrypt_favorites", Context.MODE_PRIVATE)
+    private fun prefs(context: Context) = context.getSharedPreferences(Profile.name("qscrypt_favorites"), Context.MODE_PRIVATE)
 
     fun has(context: Context, key: String): Boolean = key.isNotEmpty() && prefs(context).contains(key)
 
