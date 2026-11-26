@@ -5,7 +5,7 @@
 //! (NoFatChain, as Windows does) and a FAT chain otherwise. Writes go data
 //! first, then bitmap/FAT, then directory entries.
 
-use super::{components, same_name, split_parent, validate_name, DirEntry, FileSystem, Progress};
+use super::{components, same_name, split_parent, validate_name, CheckReport, DirEntry, FileSystem, Progress};
 use crate::disk::Disk;
 use crate::error::{Error, Result};
 use crate::util::{civil_from_unix, le16, le32, le64, now_unix, put_le16, put_le32, put_le64, unix_from_civil, Civil};
@@ -787,6 +787,237 @@ impl Exfat {
     }
 }
 
+impl Exfat {
+    fn zero_free_impl(&mut self, cursor: u64, max: u64) -> Result<(u64, bool)> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+        let cs = self.cluster_size;
+        let end = self.cluster_count + 2;
+        let mut c = if cursor <= self.heap_offset { 2 } else { 2 + ((cursor - self.heap_offset).div_ceil(cs)) as u32 };
+        let budget = max.max(cs);
+        let mut written = 0u64;
+        let zeros = vec![0u8; IO_CHUNK];
+        while c < end && written < budget {
+            if self.blocked(c) {
+                c += 1;
+                continue;
+            }
+            let start = c;
+            let room = ((budget - written) / cs).max(1) as u32;
+            while c < end && c - start < room && !self.blocked(c) {
+                c += 1;
+            }
+            let mut off = self.cluster_offset(start);
+            let stop = off + (c - start) as u64 * cs;
+            while off < stop {
+                let n = ((stop - off) as usize).min(IO_CHUNK);
+                self.disk.write_at(off, &zeros[..n])?;
+                off += n as u64;
+            }
+            written += (c - start) as u64 * cs;
+        }
+        self.disk.flush()?;
+        if c >= end {
+            Ok((self.heap_offset + self.cluster_count as u64 * cs, true))
+        } else {
+            Ok((self.cluster_offset(c), false))
+        }
+    }
+
+    fn move_impl(&mut self, path: &str, dest_dir: &str) -> Result<()> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+        super::check_move(path, dest_dir)?;
+        let (parent, leaf) = split_parent(path)?;
+        let dest: Vec<&str> = dest_dir.split('/').filter(|c| !c.is_empty()).collect();
+        let (from, _) = self.resolve_dir(&parent)?;
+        let (to, _) = self.resolve_dir(&dest)?;
+        if from.first == to.first {
+            return Ok(());
+        }
+        let src = self.load_dir(&parent)?;
+        let it = self.find_in(&src, leaf).ok_or(Error::NotFound)?;
+        let mut dst = self.load_dir(&dest)?;
+        if self.find_in(&dst, &it.name).is_some() {
+            return Err(Error::AlreadyExists);
+        }
+        let set = self.entry_set(&it.name, it.attr, it.stream, Some(&it.file_entry));
+        self.insert_set(&mut dst, &set)?;
+        // Growing the destination may have rewritten its entry in the source: reload.
+        let mut src = self.load_dir(&parent)?;
+        let cur = self.find_in(&src, leaf).ok_or(Error::NotFound)?;
+        for i in cur.index..cur.index + cur.count {
+            src.data[i * ENTRY] &= 0x7F;
+        }
+        for i in cur.index..cur.index + cur.count {
+            self.write_dir_entries(&src, i, 1)?;
+        }
+        self.disk.flush()
+    }
+
+    fn check_impl(&mut self, repair: bool) -> Result<CheckReport> {
+        let mut r = CheckReport::default();
+        let repair = repair && !self.read_only;
+        let cs = self.cluster_size;
+        let end = (self.cluster_count + 2) as usize;
+        let mut owner = vec![false; end];
+        let claim = |r: &mut CheckReport, owner: &mut Vec<bool>, c: u32, what: &str| -> bool {
+            if owner[c as usize] {
+                r.cross_linked += 1;
+                r.issue(format!("{what}: shares a cluster"));
+                return false;
+            }
+            owner[c as usize] = true;
+            true
+        };
+        for c in self.bitmap_clusters.clone() {
+            claim(&mut r, &mut owner, c, "allocation bitmap");
+        }
+        // The up-case table, from the root's 0x82 entry.
+        let root = self.root;
+        let root_data = self.read_stream(&root, MAX_DIR_BYTES)?;
+        for e in root_data.chunks_exact(ENTRY) {
+            if e[0] == 0 {
+                break;
+            }
+            if e[0] == 0x82 {
+                let len = le64(e, 24);
+                let u = Stream { first: le32(e, 20), size: len, valid: len, contiguous: false };
+                if let Ok(cl) = self.metadata_clusters(&u) {
+                    for c in cl {
+                        claim(&mut r, &mut owner, c, "up-case table");
+                    }
+                }
+            }
+        }
+        let mut fixes_bitmap = Vec::new();
+        let mut stack: Vec<(Stream, String)> = vec![(root, String::new())];
+        let mut seen = std::collections::HashSet::new();
+        while let Some((dir, path)) = stack.pop() {
+            let shown = if path.is_empty() { "/".to_string() } else { path.clone() };
+            let clusters = match self.clusters_of(&dir) {
+                Ok(c) => c,
+                Err(_) => {
+                    r.bad_chains += 1;
+                    r.issue(format!("{shown}: broken folder chain"));
+                    continue;
+                }
+            };
+            for &c in &clusters {
+                claim(&mut r, &mut owner, c, &shown);
+                if !self.used(c) {
+                    r.bitmap_errors += 1;
+                    fixes_bitmap.push(c);
+                }
+            }
+            r.used_bytes += clusters.len() as u64 * cs;
+            let data = match self.read_stream(&dir, MAX_DIR_BYTES) {
+                Ok(d) => d,
+                Err(_) => {
+                    r.bad_chains += 1;
+                    r.issue(format!("{shown}: unreadable folder"));
+                    continue;
+                }
+            };
+            let n = data.len() / ENTRY;
+            let mut i = 0;
+            while i < n {
+                let t = data[i * ENTRY];
+                if t == 0 {
+                    break;
+                }
+                if t == 0x85 {
+                    let sec = data[i * ENTRY + 1] as usize;
+                    if sec >= 2 && i + sec < n {
+                        let set = &data[i * ENTRY..(i + 1 + sec) * ENTRY];
+                        if entry_set_checksum(set) != le16(&data[i * ENTRY..], 2) {
+                            r.checksum_errors += 1;
+                            r.issue(format!("{shown}: an entry with a bad checksum (hidden)"));
+                        }
+                        i += 1 + sec;
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+            for it in self.parse(&data) {
+                let p = format!("{path}/{}", it.name);
+                if it.is_dir() {
+                    r.dirs += 1;
+                    if seen.insert(it.stream.first) && stack.len() < 10_000 {
+                        stack.push((it.stream, p));
+                    }
+                    continue;
+                }
+                r.files += 1;
+                if it.stream.size == 0 {
+                    continue;
+                }
+                let cl = match self.clusters_of(&it.stream) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        r.bad_chains += 1;
+                        r.issue(format!("{p}: broken cluster chain"));
+                        continue;
+                    }
+                };
+                if !it.stream.contiguous {
+                    if let Ok(full) = self.chain(it.stream.first) {
+                        if full.len() > cl.len() {
+                            r.size_mismatches += 1;
+                            r.issue(format!("{p}: {} extra clusters", full.len() - cl.len()));
+                            if repair {
+                                self.set_fat(cl[cl.len() - 1], EOC);
+                                for &c in &full[cl.len()..] {
+                                    self.set_fat(c, 0);
+                                }
+                                r.repaired += 1;
+                            }
+                        }
+                    }
+                }
+                for &c in &cl {
+                    if !claim(&mut r, &mut owner, c, &p) {
+                        break;
+                    }
+                    if !self.used(c) {
+                        r.bitmap_errors += 1;
+                        fixes_bitmap.push(c);
+                    }
+                }
+                r.used_bytes += cl.len() as u64 * cs;
+            }
+        }
+        if !fixes_bitmap.is_empty() {
+            r.issue(format!("{} clusters in use are marked free", fixes_bitmap.len()));
+            if repair {
+                for &c in &fixes_bitmap {
+                    self.set_used(c, true);
+                }
+                r.repaired += 1;
+            }
+        }
+        let lost: Vec<u32> = (2..end as u32).filter(|&c| self.used(c) && !owner[c as usize]).collect();
+        if !lost.is_empty() {
+            r.lost_clusters = lost.len() as u64;
+            r.issue(format!("{} lost clusters ({} bytes)", lost.len(), lost.len() as u64 * cs));
+            if repair {
+                for &c in &lost {
+                    self.set_used(c, false);
+                }
+                r.repaired += 1;
+            }
+        }
+        if repair && r.repaired > 0 {
+            self.flush_meta()?;
+            self.disk.flush()?;
+        }
+        Ok(r)
+    }
+}
+
 impl FileSystem for Exfat {
     fn kind(&self) -> &'static str {
         "exFAT"
@@ -983,6 +1214,18 @@ impl FileSystem for Exfat {
         let sum = entry_set_checksum(&dir.data[at..at + it.count * ENTRY]);
         put_le16(&mut dir.data, at + 2, sum);
         self.write_dir_entries(&dir, it.index, it.count)
+    }
+
+    fn zero_free(&mut self, cursor: u64, max: u64) -> Result<(u64, bool)> {
+        self.zero_free_impl(cursor, max)
+    }
+
+    fn move_item(&mut self, path: &str, dest_dir: &str) -> Result<()> {
+        self.move_impl(path, dest_dir)
+    }
+
+    fn check(&mut self, repair: bool) -> Result<CheckReport> {
+        self.check_impl(repair)
     }
 
     fn reserve(&mut self, start: u64, end: u64) {

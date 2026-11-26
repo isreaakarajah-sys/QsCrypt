@@ -256,7 +256,7 @@ pub fn create_volume(
             start: hoffset + hdata,
             end: DATA_OFFSET + data_size,
             chain: CipherChain::new(backend, opts.ea, &master)?,
-            plan: FatPlan { fat_type: "", cluster_size: 512, patches: Vec::new() },
+            plan: FatPlan { fat_type: "", cluster_size: 512, patches: Vec::new(), meta_end: 0 },
         };
         areas.push(outer_tail);
         hidden_header = Some((params, plain));
@@ -291,7 +291,7 @@ pub fn create_volume(
             let n = ((area.end - pos) as usize).min(CHUNK - (pos % CHUNK as u64) as usize);
             let rel = pos - area.start;
             let has_meta = area.plan.patches.iter().any(|(o, b)| *o < rel + n as u64 && o + b.len() as u64 > rel);
-            if !opts.quick || has_meta {
+            if !opts.quick || has_meta || rel < area.plan.meta_end {
                 let chunk = &mut buf[..n];
                 chunk.fill(0);
                 apply_patches(&area.plan.patches, rel, chunk);

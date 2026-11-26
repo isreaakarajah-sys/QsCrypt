@@ -33,6 +33,7 @@ pub fn create(
     opts: &Options,
     filesystem: FsChoice,
     label: &str,
+    quick: bool,
     progress: &mut dyn FnMut(u64, u64) -> bool,
     cancel: &AtomicBool,
 ) -> Result<()> {
@@ -57,11 +58,14 @@ pub fn create(
     let mut pos = 0u64;
     while pos < data {
         let n = ((data - pos) as usize).min(buf.len());
-        let c = &mut buf[..n];
-        c.fill(0);
-        apply_patches(&plan.patches, pos, c);
-        chain.encrypt(c, 512, pos / 512);
-        disk.write_at(AREA + pos, c)?;
+        let has_meta = plan.patches.iter().any(|(o, b)| *o < pos + n as u64 && o + b.len() as u64 > pos);
+        if !quick || has_meta || pos < plan.meta_end {
+            let c = &mut buf[..n];
+            c.fill(0);
+            apply_patches(&plan.patches, pos, c);
+            chain.encrypt(c, 512, pos / 512);
+            disk.write_at(AREA + pos, c)?;
+        }
         pos += n as u64;
         if cancel.load(Ordering::Relaxed) || !progress(pos, data) {
             return Err(Error::Cancelled);
@@ -161,7 +165,7 @@ mod tests {
         };
         let shared: SharedDisk = Arc::new(Mutex::new(Box::new(MemDisk::new(6 << 20))));
         let mut d = DiskView::whole(shared.clone(), false).unwrap();
-        create(&b, &mut d, &o, FsChoice::Exfat, "QsVault", &mut |_, _| true, &AtomicBool::new(false)).unwrap();
+        create(&b, &mut d, &o, FsChoice::Exfat, "QsVault", false, &mut |_, _| true, &AtomicBool::new(false)).unwrap();
         let view = || Box::new(DiskView::whole(shared.clone(), false).unwrap());
 
         let h = read_header(view().as_mut()).unwrap();

@@ -4,7 +4,7 @@
 //! flush. Writes go data first, then the FAT, then the directory entry, so
 //! an interruption can only leak clusters, never corrupt existing files.
 
-use super::{components, same_name, split_parent, validate_name, DirEntry, FileSystem, Progress};
+use super::{components, same_name, split_parent, validate_name, CheckReport, DirEntry, FileSystem, Progress};
 use crate::disk::Disk;
 use crate::error::{Error, Result};
 use crate::util::{civil_from_unix, le16, le32, now_unix, put_le16, put_le32, unix_from_civil, Civil};
@@ -765,6 +765,207 @@ impl Fat {
     }
 }
 
+impl Fat {
+    fn is_bad_marker(&self, v: u32) -> bool {
+        match self.ty {
+            FatType::Fat12 => v == 0xFF7,
+            FatType::Fat16 => v == 0xFFF7,
+            FatType::Fat32 => v == 0x0FFF_FFF7,
+        }
+    }
+
+    fn zero_free_impl(&mut self, cursor: u64, max: u64) -> Result<(u64, bool)> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+        let cs = self.cluster_size as u64;
+        let end = self.clusters + 2;
+        let mut c = if cursor <= self.data_offset { 2 } else { 2 + ((cursor - self.data_offset).div_ceil(cs)) as u32 };
+        let budget = max.max(cs);
+        let mut written = 0u64;
+        let zeros = vec![0u8; IO_CHUNK];
+        while c < end && written < budget {
+            if self.entry(c) != 0 || self.is_reserved(c) {
+                c += 1;
+                continue;
+            }
+            let start = c;
+            let room = ((budget - written) / cs).max(1) as u32;
+            while c < end && c - start < room && self.entry(c) == 0 && !self.is_reserved(c) {
+                c += 1;
+            }
+            let mut off = self.cluster_offset(start);
+            let stop = self.cluster_offset(start) + (c - start) as u64 * cs;
+            while off < stop {
+                let n = ((stop - off) as usize).min(IO_CHUNK);
+                self.disk.write_at(off, &zeros[..n])?;
+                off += n as u64;
+            }
+            written += (c - start) as u64 * cs;
+        }
+        self.disk.flush()?;
+        if c >= end {
+            Ok((self.data_offset + self.clusters as u64 * cs, true))
+        } else {
+            Ok((self.cluster_offset(c), false))
+        }
+    }
+
+    fn move_impl(&mut self, path: &str, dest_dir: &str) -> Result<()> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+        super::check_move(path, dest_dir)?;
+        let (src_dir, it) = self.resolve_item(path)?;
+        let comps: Vec<&str> = dest_dir.split('/').filter(|c| !c.is_empty()).collect();
+        let dest_loc = self.resolve_dir(&comps)?;
+        if dest_loc == src_dir.loc {
+            return Ok(());
+        }
+        let mut dest = self.read_dir(dest_loc)?;
+        if self.find(&self.parse(&dest), &it.name).is_some() {
+            return Err(Error::AlreadyExists);
+        }
+        self.add_entry(&mut dest, &it.name, it.attr, it.first_cluster, it.size, it.created, it.modified)?;
+        // The source directory may have changed if it was the destination's parent; re-read it.
+        let mut src = self.read_dir(src_dir.loc)?;
+        let current = self.parse(&src).into_iter().find(|i| i.sfn == it.sfn && i.first_cluster == it.first_cluster).ok_or(Error::NotFound)?;
+        self.delete_entries(&mut src, &current)?;
+        if it.is_dir() && it.first_cluster != 0 {
+            // ".." of the moved directory now names its new parent (0 for the root).
+            let parent = match dest_loc {
+                DirLoc::Chain(p) if !(self.ty == FatType::Fat32 && p == self.root_cluster) => p,
+                _ => 0,
+            };
+            let off = self.cluster_offset(it.first_cluster) + ENTRY as u64;
+            let mut e = [0u8; ENTRY];
+            self.disk.read_at(off, &mut e)?;
+            if &e[..11] == b"..         " {
+                put_le16(&mut e, 20, (parent >> 16) as u16);
+                put_le16(&mut e, 26, parent as u16);
+                self.disk.write_at(off, &e)?;
+            }
+        }
+        self.disk.flush()
+    }
+
+    fn check_impl(&mut self, repair: bool) -> Result<CheckReport> {
+        let mut r = CheckReport::default();
+        let repair = repair && !self.read_only;
+        let cs = self.cluster_size as u64;
+        let end = (self.clusters + 2) as usize;
+        let mut owner: Vec<bool> = vec![false; end];
+        // Directories to visit: (location, path).
+        let mut stack: Vec<(DirLoc, String)> = vec![(self.root_loc(), String::new())];
+        let mut seen_dirs = std::collections::HashSet::new();
+        while let Some((loc, path)) = stack.pop() {
+            let dir = match self.read_dir(loc) {
+                Ok(d) => d,
+                Err(_) => {
+                    r.bad_chains += 1;
+                    r.issue(format!("{}: unreadable folder", if path.is_empty() { "/" } else { &path }));
+                    continue;
+                }
+            };
+            for &c in &dir.clusters {
+                if owner[c as usize] {
+                    r.cross_linked += 1;
+                    r.issue(format!("{path}/: shares a cluster"));
+                }
+                owner[c as usize] = true;
+            }
+            r.used_bytes += dir.clusters.len() as u64 * cs;
+            for it in self.parse(&dir) {
+                let p = format!("{path}/{}", it.name);
+                if it.is_dir() {
+                    r.dirs += 1;
+                    if it.first_cluster == 0 || !self.valid_cluster(it.first_cluster) {
+                        r.bad_chains += 1;
+                        r.issue(format!("{p}: folder points nowhere"));
+                    } else if seen_dirs.insert(it.first_cluster) && stack.len() < 10_000 {
+                        stack.push((DirLoc::Chain(it.first_cluster), p));
+                    }
+                    continue;
+                }
+                r.files += 1;
+                let chain = match self.chain(it.first_cluster) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        r.bad_chains += 1;
+                        r.issue(format!("{p}: broken cluster chain"));
+                        continue;
+                    }
+                };
+                let need = (it.size as u64).div_ceil(cs) as usize;
+                let mut keep = chain.len();
+                if chain.len() < need {
+                    r.size_mismatches += 1;
+                    r.issue(format!("{p}: shorter on disk than its size"));
+                } else if chain.len() > need && need > 0 {
+                    r.size_mismatches += 1;
+                    r.issue(format!("{p}: {} extra clusters", chain.len() - need));
+                    keep = need;
+                    if repair {
+                        let eoc = self.eoc();
+                        self.set_entry(chain[need - 1], eoc);
+                        for &c in &chain[need..] {
+                            self.set_entry(c, 0);
+                        }
+                        self.free_count = None;
+                        r.repaired += 1;
+                    }
+                }
+                for &c in &chain[..keep] {
+                    if owner[c as usize] {
+                        r.cross_linked += 1;
+                        r.issue(format!("{p}: shares a cluster with another file"));
+                        break;
+                    }
+                    owner[c as usize] = true;
+                }
+                r.used_bytes += keep as u64 * cs;
+            }
+        }
+        let mut lost = Vec::new();
+        for c in 2..end as u32 {
+            let v = self.entry(c);
+            if v != 0 && !self.is_bad_marker(v) && !owner[c as usize] {
+                lost.push(c);
+            }
+        }
+        if !lost.is_empty() {
+            r.lost_clusters = lost.len() as u64;
+            r.issue(format!("{} lost clusters ({} bytes)", lost.len(), lost.len() as u64 * cs));
+            if repair {
+                for &c in &lost {
+                    self.set_entry(c, 0);
+                }
+                self.free_count = None;
+                r.repaired += 1;
+            }
+        }
+        let actual = (2..end as u32).filter(|&c| self.entry(c) == 0).count() as u32;
+        if let Some(off) = self.fsinfo {
+            let mut sec = vec![0u8; self.bps as usize];
+            self.disk.read_at(off, &mut sec)?;
+            let stored = le32(&sec, 488);
+            if stored != 0xFFFF_FFFF && stored != actual && lost.is_empty() {
+                r.free_count_wrong = true;
+                r.issue(format!("free cluster count says {stored}, actually {actual}"));
+                if repair {
+                    r.repaired += 1;
+                }
+            }
+        }
+        if repair && r.repaired > 0 {
+            self.free_count = Some(actual);
+            self.flush_fat()?;
+            self.disk.flush()?;
+        }
+        Ok(r)
+    }
+}
+
 impl FileSystem for Fat {
     fn kind(&self) -> &'static str {
         match self.ty {
@@ -978,6 +1179,18 @@ impl FileSystem for Fat {
         let (mut dir, it) = self.resolve_item(path)?;
         dir.data[it.sfn * ENTRY + 11] |= 0x06;
         self.write_entries(&dir, it.sfn, 1)
+    }
+
+    fn zero_free(&mut self, cursor: u64, max: u64) -> Result<(u64, bool)> {
+        self.zero_free_impl(cursor, max)
+    }
+
+    fn move_item(&mut self, path: &str, dest_dir: &str) -> Result<()> {
+        self.move_impl(path, dest_dir)
+    }
+
+    fn check(&mut self, repair: bool) -> Result<CheckReport> {
+        self.check_impl(repair)
     }
 
     fn reserve(&mut self, start: u64, end: u64) {

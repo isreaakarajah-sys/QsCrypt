@@ -57,6 +57,50 @@ pub struct DirEntry {
 /// Reports bytes processed so far; returning `false` cancels.
 pub type Progress<'a> = &'a mut dyn FnMut(u64) -> bool;
 
+/// What a file system check found (and, with repair, fixed).
+#[derive(Clone, Debug, Default)]
+pub struct CheckReport {
+    pub files: u64,
+    pub dirs: u64,
+    pub used_bytes: u64,
+    /// Allocated clusters nothing refers to.
+    pub lost_clusters: u64,
+    /// Clusters claimed by two files or directories.
+    pub cross_linked: u64,
+    /// Chains that leave the volume, loop, or end early.
+    pub bad_chains: u64,
+    /// Files whose size and allocation disagree.
+    pub size_mismatches: u64,
+    /// exFAT: clusters in use but marked free in the bitmap.
+    pub bitmap_errors: u64,
+    /// exFAT: entry sets whose checksum fails (they are invisible).
+    pub checksum_errors: u64,
+    /// The stored count of free clusters is wrong.
+    pub free_count_wrong: bool,
+    /// Fixes applied (with repair).
+    pub repaired: u64,
+    /// The first few problems, with paths.
+    pub issues: Vec<String>,
+}
+
+impl CheckReport {
+    pub fn clean(&self) -> bool {
+        self.lost_clusters == 0
+            && self.cross_linked == 0
+            && self.bad_chains == 0
+            && self.size_mismatches == 0
+            && self.bitmap_errors == 0
+            && self.checksum_errors == 0
+            && !self.free_count_wrong
+    }
+
+    pub(crate) fn issue(&mut self, text: String) {
+        if self.issues.len() < 50 {
+            self.issues.push(text);
+        }
+    }
+}
+
 pub trait FileSystem: Send {
     /// "FAT12", "FAT16", "FAT32", "exFAT".
     fn kind(&self) -> &'static str;
@@ -97,7 +141,43 @@ pub trait FileSystem: Send {
     fn set_hidden_system(&mut self, _path: &str) -> Result<()> {
         Err(Error::unsupported("attributes on this file system"))
     }
+
+    /// Writes zeros over free clusters from byte `cursor` of the volume, at
+    /// most about `max` bytes per call; returns where to continue and
+    /// whether the end was reached. Through an encrypted volume the zeros
+    /// become ciphertext that looks random: this completes a quick format
+    /// in the background (resumable from the cursor), and erases the traces
+    /// of deleted files. Clusters in use, or reserved, are never touched.
+    fn zero_free(&mut self, _cursor: u64, _max: u64) -> Result<(u64, bool)> {
+        Err(Error::unsupported("filling free space on this file system"))
+    }
+
+    /// Moves a file or directory into another directory of the same volume
+    /// without copying its data.
+    fn move_item(&mut self, _path: &str, _dest_dir: &str) -> Result<()> {
+        Err(Error::unsupported("moving on this file system"))
+    }
+
+    /// Checks the structures; with `repair`, fixes what is safe to fix
+    /// (lost clusters, extra clusters, free counts, the exFAT bitmap).
+    fn check(&mut self, _repair: bool) -> Result<CheckReport> {
+        Err(Error::unsupported("checking this file system"))
+    }
 }
+
+/// Refuses to move a directory into itself or below it.
+pub(crate) fn check_move(path: &str, dest_dir: &str) -> Result<()> {
+    let p = path.trim_end_matches('/');
+    let d = dest_dir.trim_end_matches('/');
+    if p.is_empty() {
+        return Err(Error::invalid("cannot move the root"));
+    }
+    if d == p || d.starts_with(&format!("{p}/")) {
+        return Err(Error::invalid("cannot move a folder into itself"));
+    }
+    Ok(())
+}
+
 
 /// Merges consecutive clusters into byte ranges.
 pub(crate) fn runs(clusters: &[u32], base: u64, cluster_size: u64, len: u64) -> Vec<(u64, u64)> {

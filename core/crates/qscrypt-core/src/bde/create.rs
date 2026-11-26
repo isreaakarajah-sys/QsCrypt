@@ -352,7 +352,7 @@ pub fn create_bitlocker(
     while pos < size {
         let n = ((size - pos) as usize).min(chunk);
         let has_meta = plan.patches.iter().any(|(o, b)| *o < pos + n as u64 && o + b.len() as u64 > pos);
-        if !opts.quick || has_meta {
+        if !opts.quick || has_meta || pos < plan.meta_end {
             let c = &mut buf[..n];
             c.fill(0);
             apply_patches(&plan.patches, pos, c);

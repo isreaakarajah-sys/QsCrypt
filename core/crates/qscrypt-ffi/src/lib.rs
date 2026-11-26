@@ -12,6 +12,7 @@
 
 mod api;
 mod api2;
+mod api3;
 #[cfg(any(target_os = "android", target_os = "linux"))]
 mod usbfs;
 

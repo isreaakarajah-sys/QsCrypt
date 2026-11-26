@@ -11,6 +11,7 @@
 
 pub mod bde;
 pub mod crypto;
+pub mod disguise;
 pub mod disk;
 pub mod error;
 pub mod fs;

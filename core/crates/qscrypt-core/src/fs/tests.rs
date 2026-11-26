@@ -475,3 +475,164 @@ fn reserve_keeps_allocator_away() {
         assert!(img[(size - (8 << 20)) as usize..].iter().all(|&b| b != 2));
     }
 }
+
+/// An image whose unused sectors hold garbage, as a reused flash drive would.
+fn dirty_image(size: usize, plan: FatPlan) -> Shared {
+    let mut raw = vec![0xA5u8; size];
+    // As a quick format writes it: the metadata region is zeros plus patches,
+    // everything else keeps the garbage.
+    raw[..plan.meta_end as usize].fill(0);
+    apply_patches(&plan.patches, 0, &mut raw);
+    Shared(Arc::new(Mutex::new(raw)))
+}
+
+fn tool_images() -> Vec<(&'static str, Shared)> {
+    let fat16 = 24usize << 20;
+    let fat32 = 40usize << 20;
+    let ex = 16usize << 20;
+    vec![
+        ("FAT16", dirty_image(fat16, format_plan(fat16 as u64, "T", 7).unwrap())),
+        ("FAT32", dirty_image(fat32, format_plan_fat32(fat32 as u64, "T").unwrap())),
+        ("exFAT", dirty_image(ex, super::exfat_format::plan_with(ex as u64, "T", 7, 4096).unwrap())),
+    ]
+}
+
+#[test]
+fn zero_free_fills_only_free_clusters_and_resumes() {
+    for (kind, d) in tool_images() {
+        let mut fs = fs_of(&d);
+        let a = data(300_000, 1);
+        let b = data(70_000, 2);
+        fs.mkdir("/dir").unwrap();
+        put(&mut fs, "/dir/a.bin", &a);
+        put(&mut fs, "/b.bin", &b);
+        fs.remove("/b.bin").unwrap(); // a deleted file: its old bytes must go too
+        put(&mut fs, "/c.bin", &b);
+        // Small steps, as the app runs them, with a "restart" in the middle.
+        let mut cursor = 0u64;
+        let mut steps = 0;
+        loop {
+            let (next, done) = fs.zero_free(cursor, 256 * 1024).unwrap();
+            assert!(next >= cursor, "{kind}: cursor went back");
+            cursor = next;
+            steps += 1;
+            if steps == 3 {
+                drop(fs);
+                fs = fs_of(&d);
+            }
+            if done {
+                break;
+            }
+        }
+        assert!(steps > 3, "{kind}: should take several steps");
+        assert_eq!(get(&mut fs, "/dir/a.bin"), a, "{kind}");
+        assert_eq!(get(&mut fs, "/c.bin"), b, "{kind}");
+        let r = fs.check(false).unwrap();
+        assert!(r.clean(), "{kind}: {:?}", r.issues);
+        drop(fs);
+        // No garbage byte survives anywhere: free space is zero, metadata and files are intact.
+        let img = d.0.lock().unwrap();
+        let left = img.chunks(4096).filter(|c| c.iter().all(|&x| x == 0xA5)).count();
+        assert_eq!(left, 0, "{kind}: {left} untouched 4K blocks remain");
+    }
+}
+
+#[test]
+fn move_keeps_data_without_copying() {
+    for (kind, d) in tool_images() {
+        let mut fs = fs_of(&d);
+        let a = data(50_000, 3);
+        fs.mkdir("/from").unwrap();
+        fs.mkdir("/to").unwrap();
+        fs.mkdir("/from/sub").unwrap();
+        put(&mut fs, "/from/a.bin", &a);
+        put(&mut fs, "/from/sub/inner.txt", b"inner");
+        let free_before = fs.free_bytes().unwrap();
+        fs.move_item("/from/a.bin", "/to").unwrap();
+        assert_eq!(fs.free_bytes().unwrap(), free_before, "{kind}: a move must not allocate data");
+        assert_eq!(get(&mut fs, "/to/a.bin"), a, "{kind}");
+        assert!(fs.stat("/from/a.bin").is_err(), "{kind}");
+        // A whole folder, then back to the root.
+        fs.move_item("/from/sub", "/to").unwrap();
+        assert_eq!(get(&mut fs, "/to/sub/inner.txt"), b"inner", "{kind}");
+        fs.move_item("/to/sub", "/").unwrap();
+        assert_eq!(get(&mut fs, "/sub/inner.txt"), b"inner", "{kind}");
+        put(&mut fs, "/sub/more.txt", b"more");
+        // Refusals.
+        assert!(fs.move_item("/to", "/to").is_err(), "{kind}");
+        fs.mkdir("/to/deeper").unwrap();
+        assert!(fs.move_item("/to", "/to/deeper").is_err(), "{kind}");
+        put(&mut fs, "/from/a.bin", b"other");
+        assert!(matches!(fs.move_item("/from/a.bin", "/to"), Err(Error::AlreadyExists)), "{kind}");
+        let r = fs.check(false).unwrap();
+        assert!(r.clean(), "{kind}: {:?}", r.issues);
+        drop(fs);
+        let mut fs = fs_of(&d);
+        assert_eq!(get(&mut fs, "/to/a.bin"), a, "{kind}: after remount");
+        assert_eq!(get(&mut fs, "/sub/more.txt"), b"more", "{kind}");
+    }
+}
+
+/// Byte offset of FAT entry `c` (FAT16/FAT32 images made by `format_plan*`).
+fn fat_entry_offset(img: &[u8], c: u32) -> (usize, usize) {
+    let bps = u16::from_le_bytes([img[11], img[12]]) as usize;
+    let reserved = u16::from_le_bytes([img[14], img[15]]) as usize;
+    let fat32 = u16::from_le_bytes([img[22], img[23]]) == 0;
+    let width = if fat32 { 4 } else { 2 };
+    (reserved * bps + c as usize * width, width)
+}
+
+#[test]
+fn check_finds_and_repairs_lost_and_extra_clusters() {
+    for (kind, d) in tool_images() {
+        let mut fs = fs_of(&d);
+        put(&mut fs, "/keep.bin", &data(20_000, 4));
+        fs.flush().unwrap();
+        assert!(fs.check(false).unwrap().clean(), "{kind}");
+        drop(fs);
+        {
+            let mut img = d.0.lock().unwrap();
+            if kind == "exFAT" {
+                // Mark three free clusters used in the allocation bitmap (cluster 2 onward).
+                let bps = 1usize << img[108];
+                let cs = bps << img[109];
+                let heap = u32::from_le_bytes(img[88..92].try_into().unwrap()) as usize * bps;
+                let root = u32::from_le_bytes(img[96..100].try_into().unwrap()) as usize;
+                let root_off = heap + (root - 2) * cs;
+                let mut bitmap_first = 0usize;
+                for e in img[root_off..root_off + cs].chunks(32) {
+                    if e[0] == 0x81 {
+                        bitmap_first = u32::from_le_bytes(e[20..24].try_into().unwrap()) as usize;
+                    }
+                }
+                let bm = heap + (bitmap_first - 2) * cs;
+                // Clusters far from the start are free in a fresh image.
+                img[bm + 200] |= 0b0000_0111;
+            } else {
+                // Allocate three free clusters as a chain nobody owns.
+                let eoc = if fat_entry_offset(&img, 0).1 == 4 { 0x0FFF_FFFFu32 } else { 0xFFFF };
+                for (c, v) in [(1500u32, 1501u32), (1501, 1502), (1502, eoc)] {
+                    let (o, w) = fat_entry_offset(&img, c);
+                    if w == 4 {
+                        img[o..o + 4].copy_from_slice(&v.to_le_bytes());
+                    } else {
+                        img[o..o + 2].copy_from_slice(&(v as u16).to_le_bytes());
+                    }
+                }
+            }
+        }
+        let mut fs = fs_of(&d);
+        let r = fs.check(false).unwrap();
+        assert_eq!(r.lost_clusters, 3, "{kind}: {:?}", r);
+        assert!(!r.clean());
+        let free_before = fs.free_bytes().unwrap();
+        let r = fs.check(true).unwrap();
+        assert!(r.repaired > 0, "{kind}");
+        assert!(fs.free_bytes().unwrap() > free_before, "{kind}: repair frees the space");
+        assert!(fs.check(false).unwrap().clean(), "{kind}: clean after repair");
+        drop(fs);
+        let mut fs = fs_of(&d);
+        assert!(fs.check(false).unwrap().clean(), "{kind}: clean after remount");
+        assert_eq!(get(&mut fs, "/keep.bin"), data(20_000, 4), "{kind}");
+    }
+}

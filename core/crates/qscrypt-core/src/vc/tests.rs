@@ -419,3 +419,77 @@ impl Disk for SharedDisk {
         self.0.lock().unwrap().len() as u64
     }
 }
+
+/// A large disk that only stores what is written (unwritten bytes read as zeros, like a new file).
+#[derive(Clone)]
+struct SparseDisk {
+    len: u64,
+    chunks: Arc<Mutex<std::collections::HashMap<u64, Vec<u8>>>>,
+}
+
+impl SparseDisk {
+    const C: u64 = 1 << 16;
+    fn new(len: u64) -> SparseDisk {
+        SparseDisk { len, chunks: Arc::new(Mutex::new(std::collections::HashMap::new())) }
+    }
+}
+
+impl Disk for SparseDisk {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> crate::Result<()> {
+        let map = self.chunks.lock().unwrap();
+        let mut done = 0usize;
+        while done < buf.len() {
+            let pos = offset + done as u64;
+            let (idx, within) = (pos / Self::C, (pos % Self::C) as usize);
+            let n = (Self::C as usize - within).min(buf.len() - done);
+            match map.get(&idx) {
+                Some(c) => buf[done..done + n].copy_from_slice(&c[within..within + n]),
+                None => buf[done..done + n].fill(0),
+            }
+            done += n;
+        }
+        Ok(())
+    }
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> crate::Result<()> {
+        let mut map = self.chunks.lock().unwrap();
+        let mut done = 0usize;
+        while done < buf.len() {
+            let pos = offset + done as u64;
+            let (idx, within) = (pos / Self::C, (pos % Self::C) as usize);
+            let n = (Self::C as usize - within).min(buf.len() - done);
+            let c = map.entry(idx).or_insert_with(|| vec![0u8; Self::C as usize]);
+            c[within..within + n].copy_from_slice(&buf[done..done + n]);
+            done += n;
+        }
+        Ok(())
+    }
+    fn len(&self) -> u64 {
+        self.len
+    }
+}
+
+#[test]
+fn quick_format_of_large_volumes_writes_whole_metadata() {
+    // 3 GiB: the allocation tables span several 1 MiB chunks. Unwritten
+    // sectors decrypt to random bytes, so every metadata sector must be written.
+    let b = RefBackend::with_fakes();
+    for fs_choice in [FsChoice::Fat, FsChoice::Exfat] {
+        let size = 3u64 << 30;
+        let mut disk = SparseDisk::new(size);
+        let mut opts = CreateOptions::new(Format::VeraCrypt, b"big", Ea::Aes, Prf::Sha512, size);
+        opts.pim = 1;
+        opts.quick = true;
+        opts.filesystem = fs_choice;
+        create_volume(&b, &mut disk, &opts, &mut |_, _| true, &AtomicBool::new(false)).unwrap();
+        let written = disk.chunks.lock().unwrap().len() as u64 * SparseDisk::C;
+        assert!(written < 64 << 20, "quick format wrote {written} bytes");
+        let mut fs = mount_bytes(disk.clone(), b"big", Some(Format::VeraCrypt));
+        let r = fs.check(false).unwrap();
+        assert!(r.clean(), "{:?}: {:?}", fs_choice, r.issues);
+        assert!(fs.free_bytes().unwrap() > (3u64 << 30) - (128 << 20));
+        fs.write_file("/after.txt", &mut &b"quick and sound"[..], 15, false, &mut |_| true).unwrap();
+        let mut out = Vec::new();
+        fs.read_file("/after.txt", &mut out, &mut |_| true).unwrap();
+        assert_eq!(out, b"quick and sound");
+    }
+}

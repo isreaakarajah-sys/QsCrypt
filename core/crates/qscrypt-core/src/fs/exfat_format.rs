@@ -188,7 +188,7 @@ pub(crate) fn plan_with(size: u64, label: &str, volume_id: u32, cluster: u64) ->
     let at = |c: u32| heap * BPS + (c as u64 - 2) * cluster;
     let patches = vec![(0, boot), (FAT_OFFSET * BPS, fat), (at(bitmap_first), bitmap), (at(upcase_first), upcase), (at(root), dir)];
     debug_assert!(patches.windows(2).all(|w| w[0].0 + w[0].1.len() as u64 <= w[1].0));
-    Ok(FatPlan { fat_type: "exFAT", cluster_size: cluster as u32, patches })
+    Ok(FatPlan { fat_type: "exFAT", cluster_size: cluster as u32, patches, meta_end: at(root) + cluster })
 }
 
 #[cfg(test)]

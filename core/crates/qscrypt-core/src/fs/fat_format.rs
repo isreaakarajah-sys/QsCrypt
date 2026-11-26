@@ -10,6 +10,11 @@ pub struct FatPlan {
     pub cluster_size: u32,
     /// Sorted, non-overlapping (offset, bytes); everything else is zero.
     pub patches: Vec<(u64, Vec<u8>)>,
+    /// Everything before this offset is file system metadata (boot area,
+    /// allocation tables, root directory) and must be written as zeros plus
+    /// patches even by a quick format: through an encryption layer,
+    /// unwritten sectors read back as random bytes, not zeros.
+    pub meta_end: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -203,6 +208,8 @@ fn plan_with(size: u64, label: &str, volume_id: u32, force: Option<Ty>) -> Resul
     }
 
     patches.sort_by_key(|p| p.0);
+    let root_bytes = (g.root_entries * 32).div_ceil(BPS) * BPS;
+    let meta_end = (g.reserved + NUM_FATS * g.fat_size) * BPS + root_bytes + if g.ty == Ty::Fat32 { g.spc * BPS } else { 0 };
     Ok(FatPlan {
         fat_type: match g.ty {
             Ty::Fat12 => "FAT12",
@@ -211,6 +218,7 @@ fn plan_with(size: u64, label: &str, volume_id: u32, force: Option<Ty>) -> Resul
         },
         cluster_size: (g.spc * BPS) as u32,
         patches,
+        meta_end,
     })
 }
 

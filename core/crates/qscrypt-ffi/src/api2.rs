@@ -35,7 +35,7 @@ pub struct Call<'a> {
 }
 
 impl Call<'_> {
-    fn blob_at(&self, v: &Value) -> Option<&[u8]> {
+    pub(crate) fn blob_at(&self, v: &Value) -> Option<&[u8]> {
         let i = v.as_i64()?;
         if i < 0 {
             return None;
@@ -43,11 +43,11 @@ impl Call<'_> {
         self.blobs.get(i as usize).map(|s| &s[..])
     }
 
-    fn blob(&self, key: &str) -> Option<&[u8]> {
+    pub(crate) fn blob(&self, key: &str) -> Option<&[u8]> {
         self.blob_at(self.args.get(key))
     }
 
-    fn fd(&self, key: &str) -> Option<i32> {
+    pub(crate) fn fd(&self, key: &str) -> Option<i32> {
         let i = self.args.get(key).as_i64()?;
         if i < 0 {
             return None;
@@ -89,7 +89,10 @@ pub fn call(method: &str, args: &str, blobs: &[Secret], fds: &[i32], progress: &
         "id.public" => identity(&c).map(|id| public_json(&id.public)),
         "id.parseCard" => PublicIdentity::parse_card(c.args.get("card").str_or("")).map(|p| public_json(&p)),
         "stego.capacity" => Ok(Obj::new().bool("ok", true).uint("bytes", qscrypt_core::stego::capacity(c.args.get("w").u64_or(0) as usize, c.args.get("h").u64_or(0) as usize) as u64).end()),
-        _ => Err(Error::invalid(format!("unknown method {method}"))),
+        _ => match crate::api3::call(method, &c, progress) {
+            Some(r) => r,
+            None => Err(Error::invalid(format!("unknown method {method}"))),
+        },
     })
 }
 
@@ -125,7 +128,7 @@ static NEXT_USB: AtomicI64 = AtomicI64::new(1);
 
 /// The disk a call is about: a file descriptor, or a USB drive (or a
 /// partition of it). Returns it with the effective read-only flag.
-fn source(c: &Call, want_read_only: bool) -> Result<(Box<dyn Disk>, bool)> {
+pub(crate) fn source(c: &Call, want_read_only: bool) -> Result<(Box<dyn Disk>, bool)> {
     let s = c.args.get("src");
     if let Some(h) = s.get("usb").as_i64() {
         let reg = usb().lock().unwrap_or_else(|e| e.into_inner());
@@ -165,13 +168,13 @@ fn password(c: &Call, pw_key: &str, kf_key: &str) -> Result<Secret> {
     }
 }
 
-fn context(c: &Call) -> Context {
+pub(crate) fn context(c: &Call) -> Context {
     let x = c.args.get("context");
     let now = x.get("now").i64_or(now_unix());
     Context { now, max_seen: x.get("maxSeen").i64_or(now), online: x.get("online").bool_or(false) }
 }
 
-fn identity(c: &Call) -> Result<SecretIdentity> {
+pub(crate) fn identity(c: &Call) -> Result<SecretIdentity> {
     SecretIdentity::from_bytes(c.blob("identity").ok_or_else(|| Error::invalid("no identity"))?)
 }
 
@@ -378,7 +381,7 @@ fn open_bitlocker(c: &Call, disk: Box<dyn Disk>, ro: bool, tz: i32) -> Result<St
     Ok(register(v).1)
 }
 
-fn unlock_and<T>(c: &Call, f: impl FnOnce(&Unlock) -> Result<T>) -> Result<T> {
+pub(crate) fn unlock_and<T>(c: &Call, f: impl FnOnce(&Unlock) -> Result<T>) -> Result<T> {
     match c.args.get("unlock").str_or("password") {
         "recovery" => {
             let s = std::str::from_utf8(c.blob("password").unwrap_or(&[])).map_err(|_| Error::invalid("bad recovery key"))?.to_string();
@@ -545,7 +548,7 @@ fn volume_create(c: &Call, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result
                 policy: parse_policy(a.get("policy")),
                 params: Params::default(),
             };
-            qvol::create(backend(), disk.as_mut(), &o, fsc, &label, progress, &cancel)?;
+            qvol::create(backend(), disk.as_mut(), &o, fsc, &label, quick, progress, &cancel)?;
             let mut out = Obj::new().bool("ok", true).str("format", "QsCrypt").str("ea", "AES-Twofish-Serpent");
             if let Some(r) = &recovery {
                 out = out.str("recovery", r);
@@ -707,7 +710,7 @@ fn usb_partition(c: &Call) -> Result<String> {
 
 // ---------------------------------------------------------------- QsCrypt files
 
-fn reader(c: &Call, key: &str) -> Result<BufReader<std::fs::File>> {
+pub(crate) fn reader(c: &Call, key: &str) -> Result<BufReader<std::fs::File>> {
     let fd = c.fd(key).ok_or_else(|| Error::invalid("missing input"))?;
     Ok(BufReader::with_capacity(1 << 20, file_from_fd(fd)?))
 }
