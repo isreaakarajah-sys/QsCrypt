@@ -93,7 +93,9 @@ private fun androidx.compose.foundation.layout.RowScope.NavTab(icon: Int, label:
 }
 
 fun containerIcon(c: Container): Int = when {
-    c.name.endsWith(".qsc", ignoreCase = true) -> R.drawable.ic_shield
+    c.uri.startsWith("usb:") -> R.drawable.ic_usb
+    c.format == "QsCrypt" || c.name.endsWith(".qsc", ignoreCase = true) || c.name.endsWith(".qsv", ignoreCase = true) -> R.drawable.ic_shield
+    c.format == "BitLocker" || c.name.endsWith(".vhd", ignoreCase = true) -> R.drawable.ic_drive
     else -> R.drawable.ic_file
 }
 
@@ -124,7 +126,7 @@ fun openPicked(context: android.content.Context, uri: Uri, scope: kotlinx.corout
         }
         when (kind) {
             "qscrypt" -> AppState.push(Screen.QscDecrypt(uri.toString(), meta.name, meta.size))
-            "volume" -> {
+            "volume", "container", "bitlocker" -> {
                 val c = AppState.addContainer(Container(uri.toString(), meta.name, meta.size, System.currentTimeMillis()))
                 AppState.push(Screen.Unlock(c))
             }
@@ -218,7 +220,7 @@ private fun EmptyState(onOpen: () -> Unit) {
         Text("لا توجد خزنات بعد", style = T.itemLarge)
         Gap(6.dp)
         Text(
-            "افتح حاوية VeraCrypt أو TrueCrypt موجودة على جوالك أو على فلاشة، أو أنشئ خزنة جديدة.",
+            "افتح حاوية VeraCrypt أو TrueCrypt أو BitLocker أو QsCrypt من جوالك أو فلاشة، أو أنشئ خزنة جديدة.",
             style = T.body.copy(color = Qs.muted),
             textAlign = TextAlign.Center,
         )

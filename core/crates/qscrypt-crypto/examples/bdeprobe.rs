@@ -5,6 +5,7 @@
 //!   bdeprobe explain <image> <password> <recovery password>
 //!   bdeprobe create <image> <bytes> <exfat|fat> <password> <xts128|xts256|cbc128|cbc256>
 //!   bdeprobe check <image> <password>                       list the root and print /hello.txt
+//!   bdeprobe vhd <image.vhd> <bytes> <exfat|fat> <password> <method>   BitLocker inside a fixed VHD
 
 use qscrypt_core::bde::{self, BdeCreateOptions, Credential, Method};
 use qscrypt_core::disk::{Disk, FileDisk};
@@ -59,11 +60,39 @@ fn main() {
                 _ => Method::Cbc256,
             };
             let fsc = if a[4] == "fat" { FsChoice::Fat } else { FsChoice::Exfat };
-            let opts = BdeCreateOptions { password: &a[5], recovery_key: None, method, filesystem: fsc, label: "QSBITLOCKR", description: "QsCrypt CI 2026-11-26", quick: false };
+            let opts = BdeCreateOptions { password: &a[5], recovery_key: None, method, filesystem: fsc, label: "QSBITLOCKR", description: "QsCrypt CI 2026-11-26", quick: false, hidden_sectors: 0 };
             let rp = bde::create_bitlocker(&b, Box::new(d), &opts, &mut |_, _| true, &no).unwrap();
             let (info, _, vol) = bde::open(&b, disk(&a[2], true), &Credential::Password(&a[5]), false, &no).unwrap();
             let mut f = fs::mount(Box::new(vol), false, 0).unwrap();
             let _ = info;
+            f.write_file("/hello.txt", &mut &b"QsCrypt BitLocker"[..], 17, false, &mut |_| true).unwrap();
+            f.mkdir("/مجلد").unwrap();
+            let big: Vec<u8> = (0..5_000_000u32).map(|i| (i % 253) as u8).collect();
+            f.write_file("/مجلد/big.bin", &mut big.as_slice(), big.len() as u64, false, &mut |_| true).unwrap();
+            f.flush().unwrap();
+            println!("{rp}");
+        }
+        Some("vhd") => {
+            let size = qscrypt_core::vhd::image_size(a[3].parse().unwrap());
+            let f = File::options().read(true).write(true).create(true).truncate(true).open(&a[2]).unwrap();
+            let mut d = FileDisk::new(f, false).unwrap();
+            d.set_len(size).unwrap();
+            let method = match a[6].as_str() {
+                "xts128" => Method::Xts128,
+                "xts256" => Method::Xts256,
+                "cbc128" => Method::Cbc128,
+                _ => Method::Cbc256,
+            };
+            let fsc = if a[4] == "fat" { FsChoice::Fat } else { FsChoice::Exfat };
+            let opts = BdeCreateOptions { password: &a[5], recovery_key: None, method, filesystem: fsc, label: "QSVHD", description: "QsCrypt CI 2026-11-26", quick: true, hidden_sectors: 0 };
+            let rp = qscrypt_core::vhd::create_bitlocker_vhd(&b, Box::new(d), &opts, &mut |_, _| true, &no).unwrap();
+            let inner = qscrypt_core::vhd::unwrap(disk(&a[2], true), false).unwrap();
+            let (_, _, vol) = bde::open(&b, inner, &Credential::Password(&a[5]), false, &no).unwrap();
+            let regions = vol.reserved_regions();
+            let mut f = fs::mount(Box::new(vol), false, 0).unwrap();
+            for (x, y) in regions {
+                f.reserve(x, y);
+            }
             f.write_file("/hello.txt", &mut &b"QsCrypt BitLocker"[..], 17, false, &mut |_| true).unwrap();
             f.mkdir("/مجلد").unwrap();
             let big: Vec<u8> = (0..5_000_000u32).map(|i| (i % 253) as u8).collect();

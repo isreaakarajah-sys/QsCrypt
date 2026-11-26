@@ -42,7 +42,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import androidx.fragment.app.FragmentActivity
 import com.qscrypt.app.AppState
+import com.qscrypt.app.PhoneAuth
 import com.qscrypt.app.Prefs
 import com.qscrypt.app.QsCore
 import com.qscrypt.app.R
@@ -131,6 +133,10 @@ fun SettingsScreen() {
     var settingPin by remember { mutableStateOf(false) }
     var soon by remember { mutableStateOf<String?>(null) }
     var testing by remember { mutableStateOf(false) }
+    var lockMode by remember { mutableStateOf(PhoneAuth.mode(context)) }
+    var disguised by remember { mutableStateOf(Prefs.disguised) }
+    var askDisguise by remember { mutableStateOf(false) }
+    val phoneAuth = remember { PhoneAuth.available(context) }
     val test = AppState.selfTest
 
     if (settingPin) {
@@ -172,7 +178,62 @@ fun SettingsScreen() {
                         Prefs.closeVaultsOnLock = it
                     }
                 }
-                SettingRow(R.drawable.ic_finger, "الفتح بالبصمة", onClick = { soon = "الفتح بالبصمة قادم في الإصدار التالي." }) { ComingSoonTag() }
+                Column(Modifier.padding(vertical = 8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Tile(R.drawable.ic_finger, Qs.brass, size = 38.dp, radius = 12.dp, iconSize = 19.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text("طريقة فتح التطبيق", style = T.item)
+                            Text(if (phoneAuth) "البصمة أو الوجه أو قفل الهاتف" else "لا يوجد قفل شاشة على هذا الهاتف", style = T.small)
+                        }
+                    }
+                    Gap(10.dp)
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Chip("الرمز فقط", lockMode == PhoneAuth.Mode.Pin) {
+                                Prefs.lockMode = PhoneAuth.Mode.Pin.id
+                                lockMode = PhoneAuth.Mode.Pin
+                            }
+                            Chip("الرمز + قفل الهاتف", lockMode == PhoneAuth.Mode.TwoFactor, enabled = phoneAuth) {
+                                val a = context as? FragmentActivity ?: return@Chip
+                                PhoneAuth.prompt(a, "QsCrypt", "تأكيد قفل الهاتف كخطوة ثانية") { ok, _ ->
+                                    if (ok) {
+                                        Prefs.lockMode = PhoneAuth.Mode.TwoFactor.id
+                                        lockMode = PhoneAuth.Mode.TwoFactor
+                                    }
+                                }
+                            }
+                        }
+                        Chip("قفل الهاتف أو الرمز", lockMode == PhoneAuth.Mode.Either, enabled = phoneAuth) {
+                            val a = context as? FragmentActivity ?: return@Chip
+                            PhoneAuth.prompt(a, "QsCrypt", "تأكيد الفتح بقفل الهاتف") { ok, _ ->
+                                if (ok) {
+                                    Prefs.lockMode = PhoneAuth.Mode.Either.id
+                                    lockMode = PhoneAuth.Mode.Either
+                                }
+                            }
+                        }
+                    }
+                    Gap(6.dp)
+                    Text(
+                        when (lockMode) {
+                            PhoneAuth.Mode.TwoFactor -> "مصادقة ثنائية: الرمز السري ثم بصمتك أو قفل الهاتف. الأقوى."
+                            PhoneAuth.Mode.Either -> "أيّهما شئت: الأسرع، لكن من يعرف قفل هاتفك يفتح التطبيق."
+                            else -> "رمز QsCrypt المكوّن من 6 أرقام وحده."
+                        },
+                        style = T.small,
+                    )
+                }
+                SettingRow(R.drawable.ic_sliders, "وضع التمويه", "يظهر التطبيق كآلة حاسبة تعمل") {
+                    QsSwitch(disguised) { on ->
+                        if (on) {
+                            askDisguise = true
+                        } else if (Disguise.apply(context, false)) {
+                            disguised = false
+                            Toast.makeText(context, "عادت أيقونة QsCrypt. قد يستغرق ظهورها دقيقة.", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
             }
             Section("المحرك") {
                 Column(Modifier.padding(vertical = 10.dp)) {
@@ -256,6 +317,19 @@ fun SettingsScreen() {
         )
     }
     soon?.let { s -> QsAlert("قريباً", s, "حسناً", { soon = null }, { soon = null }, dismiss = null) }
+    if (askDisguise) {
+        QsAlert(
+            "وضع التمويه",
+            "ستختفي أيقونة QsCrypt وتظهر مكانها «الآلة الحاسبة»، وهي حاسبة تعمل فعلاً.\n\nلفتح QsCrypt: اكتب رمزك السري (6 أرقام) ثم اضغط «=».\n\nقد يستغرق تغيّر الأيقونة دقيقة، وقد تحتاج لإضافتها إلى الشاشة الرئيسية من جديد. لا تنسَ رمزك: لا يظهر أي شيء آخر يدل على التطبيق.",
+            "فعّل التمويه",
+            {
+                askDisguise = false
+                if (Disguise.apply(context, true)) disguised = true
+                else Toast.makeText(context, "تعذّر تفعيل التمويه على هذا الهاتف.", Toast.LENGTH_LONG).show()
+            },
+            { askDisguise = false },
+        )
+    }
 }
 
 @Composable
@@ -274,7 +348,7 @@ fun AboutScreen() {
             Gap(10.dp)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Tag("الإصدار ${appVersion(context)}")
-                Tag("نسخة تجريبية", TagKind.Brass)
+                Tag(RELEASE_NAME, TagKind.Brass)
             }
             Gap(6.dp)
             Text("المحرك $engine", style = T.mono.copy(color = Qs.brass, fontSize = 13.sp))
@@ -294,19 +368,18 @@ fun AboutScreen() {
         Gap(12.dp)
         QsCard {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("ما الذي يعمل في هذه النسخة", style = T.item)
+                Text("في هذا الإصدار", style = T.item)
                 listOf(
-                    "فتح حاويات VeraCrypt وTrueCrypt (العادية والمخفية) بكل خوارزمياتها الشائعة",
-                    "تصفّح FAT وexFAT، والكتابة على FAT",
-                    "إنشاء حاويات VeraCrypt وTrueCrypt",
-                    "تشفير الملفات بصيغة QsCrypt وفكّها",
-                    "قفل التطبيق ومنع لقطات الشاشة",
+                    "فتح وإنشاء حاويات VeraCrypt وTrueCrypt، مع المجلد المخفي وحمايته وملفات المفاتيح وPIM",
+                    "فتح أقراص BitLocker من ويندوز بكلمة المرور أو مفتاح الاسترداد، وإنشاؤها كملف VHD أو على فلاشة",
+                    "فلاشات وهاردات USB عبر OTG مباشرة، دون روت، وتشفيرها بالكامل بأي صيغة",
+                    "صيغة QsCrypt: AES ثم Twofish ثم XChaCha20-Poly1305 مع Argon2id، وحاويات QsCrypt",
+                    "جهات الاتصال برمز QR: تشفير لا يفتحه إلا من تختار (X25519 + ML-KEM-768) وتوقيع Ed25519",
+                    "مزايا الحماية: بلا إنترنت، صلاحية زمنية، مرة واحدة، عدد محاولات، كلمة طوارئ، مفتاح استرداد، فتح تلقائي",
+                    "الكتابة على FAT وexFAT، وقراءة NTFS",
+                    "الإخفاء داخل الصور، ووضع التمويه كآلة حاسبة",
+                    "قفل بالرمز ومصادقة ثنائية بقفل الهاتف، ومنع لقطات الشاشة",
                 ).forEach { Text("•  $it", style = T.body.copy(fontSize = 13.sp, color = Qs.muted)) }
-                Gap(6.dp)
-                Text("قادم", style = T.item)
-                listOf("NTFS وBitLocker والفلاشات المشفّرة بالكامل", "ملفات المفاتيح والبصمة", "جهات الاتصال ومزايا الحماية المتقدمة", "الإخفاء داخل الصور ووضع التمويه").forEach {
-                    Text("•  $it", style = T.body.copy(fontSize = 13.sp, color = Qs.muted))
-                }
             }
         }
         Gap(12.dp)
@@ -315,60 +388,3 @@ fun AboutScreen() {
     }
 }
 
-@Composable
-private fun ComingSoon(tab: Screen, icon: Int, title: String, intro: String, items: List<String>) {
-    Column(Modifier.fillMaxSize()) {
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
-            Gap(20.dp)
-            Row(Modifier.height(48.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(title, style = T.display.copy(lineHeight = 36.sp), modifier = Modifier.weight(1f))
-                ComingSoonTag()
-            }
-            Gap(28.dp)
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { Tile(icon, Qs.brass, size = 84.dp, radius = 26.dp, iconSize = 40.dp) }
-            Gap(20.dp)
-            Text(intro, style = T.body.copy(color = Qs.muted), textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
-            Gap(20.dp)
-            QsCard {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    items.forEach { line ->
-                        Row(verticalAlignment = Alignment.Top) {
-                            Box(Modifier.padding(top = 3.dp)) { QsIcon(R.drawable.ic_check, Qs.brass, 16.dp) }
-                            Spacer(Modifier.width(10.dp))
-                            Text(line, style = T.body.copy(fontSize = 13.5.sp))
-                        }
-                    }
-                }
-            }
-            Gap(24.dp)
-        }
-        BottomNav(tab)
-    }
-}
-
-@Composable
-fun DrivesScreen() = ComingSoon(
-    Screen.Drives,
-    R.drawable.ic_usb,
-    "الأقراص",
-    "هنا ستظهر الفلاشات والهاردات الخارجية الموصولة بالجوال عبر OTG. حالياً يمكنك فتح أي حاوية محفوظة على فلاشة من «خزناتي» ← «افتح حاوية».",
-    listOf(
-        "فتح فلاشة أو هارد مشفّر بالكامل بـ VeraCrypt أو TrueCrypt",
-        "فتح أقراص BitLocker بكلمة المرور أو مفتاح الاسترداد",
-        "تشفير فلاشة كاملة بأي صيغة",
-    ),
-)
-
-@Composable
-fun ContactsScreen() = ComingSoon(
-    Screen.Contacts,
-    R.drawable.ic_users,
-    "جهات الاتصال",
-    "أضف أصدقاءك برمز QR مرة واحدة، ثم شفّر لهم ملفات لا يفتحها غيرهم، دون أن تتبادلوا كلمات مرور.",
-    listOf(
-        "إضافة جهة اتصال بمسح رمز QR وجهاً لوجه",
-        "ربط الملف بجهة اتصال أو أكثر (X25519 + ML-KEM-768)",
-        "مزايا الحماية: بلا إنترنت، فتح لمرة واحدة، مدة صلاحية، عدد محاولات",
-        "ربط جوالك بحاسوبك دون أن يكشف فقدان أحدهما الآخر",
-    ),
-)

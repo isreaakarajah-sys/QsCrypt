@@ -1,8 +1,6 @@
 package com.qscrypt.app.ui
 
-import android.content.Context
 import android.net.Uri
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -28,8 +26,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,20 +46,25 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qscrypt.app.AppState
+import com.qscrypt.app.Call
 import com.qscrypt.app.Container
+import com.qscrypt.app.Identity
 import com.qscrypt.app.Progress
-import com.qscrypt.app.QsCore
 import com.qscrypt.app.R
 import com.qscrypt.app.Reply
 import com.qscrypt.app.Saf
 import com.qscrypt.app.Screen
 import com.qscrypt.app.Session
+import com.qscrypt.app.UsbDrives
+import com.qscrypt.app.UsbTarget
 import com.qscrypt.app.VolumeInfo
 import com.qscrypt.app.humanSize
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.TimeZone
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 
 // ------------------------------------------------------------------ shared
@@ -120,7 +125,7 @@ fun PasswordPair(password: String, confirm: String, onPassword: (String) -> Unit
 }
 
 @Composable
-private fun Choice(selected: Boolean, enabled: Boolean = true, onClick: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+internal fun Choice(selected: Boolean, enabled: Boolean = true, onClick: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
     val shape = RoundedCornerShape(20.dp)
     Column(
         Modifier
@@ -136,7 +141,7 @@ private fun Choice(selected: Boolean, enabled: Boolean = true, onClick: () -> Un
 }
 
 @Composable
-private fun Radio(selected: Boolean) {
+internal fun Radio(selected: Boolean) {
     Box(
         Modifier.size(22.dp).clip(CircleShape).border(2.dp, if (selected) Qs.brass else Qs.line, CircleShape),
         contentAlignment = Alignment.Center,
@@ -146,7 +151,7 @@ private fun Radio(selected: Boolean) {
 }
 
 @Composable
-private fun FormatOption(name: String, desc: String, selected: Boolean, enabled: Boolean = true, badge: @Composable () -> Unit = {}, onClick: () -> Unit) {
+internal fun FormatOption(name: String, desc: String, selected: Boolean, enabled: Boolean = true, badge: @Composable () -> Unit = {}, onClick: () -> Unit) {
     Choice(selected = selected, enabled = enabled, onClick = onClick) {
         Row(verticalAlignment = Alignment.Top) {
             Box(Modifier.padding(top = 1.dp)) { Radio(selected) }
@@ -164,7 +169,7 @@ private fun FormatOption(name: String, desc: String, selected: Boolean, enabled:
 }
 
 @Composable
-private fun TargetCard(modifier: Modifier, icon: Int, title: String, sub: String, selected: Boolean, soon: Boolean = false, onClick: () -> Unit) {
+internal fun TargetCard(modifier: Modifier, icon: Int, title: String, sub: String, selected: Boolean, onClick: () -> Unit) {
     val shape = RoundedCornerShape(20.dp)
     Column(
         modifier
@@ -175,11 +180,7 @@ private fun TargetCard(modifier: Modifier, icon: Int, title: String, sub: String
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            QsIcon(icon, if (selected) Qs.brass else Qs.muted, 24.dp)
-            Spacer(Modifier.weight(1f))
-            if (soon) ComingSoonTag()
-        }
+        QsIcon(icon, if (selected) Qs.brass else Qs.muted, 24.dp)
         Text(title, style = T.item, maxLines = 1)
         Text(sub, style = T.small, maxLines = 3, overflow = TextOverflow.Ellipsis)
     }
@@ -189,493 +190,503 @@ private fun TargetCard(modifier: Modifier, icon: Int, title: String, sub: String
 
 @Composable
 fun NewEncryptionScreen() {
-    var target by remember { mutableIntStateOf(0) } // 0 container, 1 files, 2 disk
+    var target by remember { mutableIntStateOf(0) }
     var format by remember { mutableStateOf("VeraCrypt") }
-    var soon by remember { mutableStateOf<String?>(null) }
-
-    Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+    Column(Modifier.fillMaxSize()) {
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
             Gap(20.dp)
-            TopBar("تشفير جديد", onBack = { AppState.pop() }) { Text("1/3", style = T.mono.copy(fontSize = 12.sp)) }
+            TopBar("تشفير جديد", onBack = { AppState.pop() })
             Gap(10.dp)
             StepBar(1, 3)
-            Gap(22.dp)
+            Gap(20.dp)
             Text("ماذا تريد أن تشفّر؟", style = T.h1)
             Gap(14.dp)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                TargetCard(Modifier.weight(1f), R.drawable.ic_file, "حاوية جديدة", "ملف مشفّر تضع فيه ملفاتك", target == 0) {
-                    target = 0
-                    format = "VeraCrypt"
-                }
-                TargetCard(Modifier.weight(1f), R.drawable.ic_doc, "ملفات", "شفّر ملفات بعينها لترسلها", target == 1) {
-                    target = 1
-                    format = "QsCrypt"
-                }
-                TargetCard(Modifier.weight(1f), R.drawable.ic_usb, "قرص كامل", "فلاشة أو هارد خارجي", target == 2, soon = true) {
-                    soon = "تشفير فلاشة أو هارد بالكامل قادم في الإصدار التالي. يمكنك الآن إنشاء حاوية على الفلاشة نفسها: اختر «حاوية جديدة» واحفظها هناك."
-                }
+                TargetCard(Modifier.weight(1f), R.drawable.ic_archive, "حاوية جديدة", "ملف مشفّر يعمل كقرص كامل", target == 0) { target = 0 }
+                TargetCard(Modifier.weight(1f), R.drawable.ic_file, "ملفات", "تشفير ملفات بعينها بصيغة QsCrypt", target == 1) { target = 1 }
+            }
+            Gap(10.dp)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                TargetCard(Modifier.weight(1f), R.drawable.ic_usb, "فلاشة أو هارد", "تشفير قرص USB كامل عبر OTG", target == 2) { target = 2 }
+                TargetCard(Modifier.weight(1f), R.drawable.ic_image, "داخل صورة", "إخفاء ملف مشفّر في صورة عادية", target == 3) { target = 3 }
             }
             Gap(22.dp)
-            Text("الصيغة", style = T.label)
-            Gap(10.dp)
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (target == 0) {
-                    FormatOption("VeraCrypt", "يُفتح على أي حاسوب ببرنامج VeraCrypt، وعلى هذا التطبيق.", format == "VeraCrypt", badge = { Tag("موصى به", TagKind.Brass) }) { format = "VeraCrypt" }
-                    FormatOption("QsCrypt", "الأقوى: ثلاث طبقات تشفير ومزايا حماية متقدمة. حاويات QsCrypt قادمة، ويمكنك الآن تشفير ملفاتك بها من «ملفات».", false, enabled = false, badge = { ComingSoonTag() }) {}
-                    FormatOption("BitLocker", "يُفتح مباشرة على Windows دون أي برنامج.", false, enabled = false, badge = { ComingSoonTag() }) {}
-                    FormatOption("TrueCrypt", "للتوافق مع الأنظمة القديمة فقط. اشتقاق مفتاحه أضعف بكثير.", format == "TrueCrypt", badge = { Tag("حماية أضعف", TagKind.Coral) }) { format = "TrueCrypt" }
-                } else {
-                    FormatOption("QsCrypt", "AES ثم Twofish ثم XChaCha20-Poly1305 مع Argon2id. يُفتح بتطبيق QsCrypt فقط، ويكشف أي تعديل على الملف.", true, badge = { Tag("موصى به", TagKind.Brass) }) {}
-                    Note("تريد أن يفتحها شخص على حاسوبه دون QsCrypt؟ أنشئ «حاوية جديدة» بصيغة VeraCrypt وضع الملفات داخلها.", icon = R.drawable.ic_info)
+            when (target) {
+                0 -> {
+                    Text("الصيغة", style = T.label)
+                    Gap(10.dp)
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        FormatOption("VeraCrypt", "يُفتح على أي حاسوب ببرنامج VeraCrypt، وعلى هذا التطبيق. يدعم المجلد المخفي وملفات المفاتيح.", format == "VeraCrypt", badge = { Tag("موصى به", TagKind.Brass) }) { format = "VeraCrypt" }
+                        FormatOption("QsCrypt", "الأقوى: AES وTwofish وSerpent معاً مع Argon2id، ومزايا الحماية كربط جهات الاتصال وكلمة الطوارئ. يُفتح بـ QsCrypt فقط.", format == "QsCrypt", badge = { Tag("الأقوى", TagKind.Mint) }) { format = "QsCrypt" }
+                        FormatOption("BitLocker", "ملف VHD يفتحه ويندوز مباشرة دون أي برنامج: انقر عليه مرتين ثم أدخل كلمة المرور.", format == "BitLocker", badge = { Tag("ويندوز", TagKind.Outline) }) { format = "BitLocker" }
+                        FormatOption("TrueCrypt", "للتوافق مع البرامج القديمة فقط. حمايته أضعف من VeraCrypt.", format == "TrueCrypt") { format = "TrueCrypt" }
+                    }
                 }
+                1 -> Note("تُشفّر الملفات بصيغة QsCrypt بثلاث طبقات، ويمكنك ربطها بجهات اتصالك أو إضافة مزايا الحماية. يُنشأ لكل ملف نسخة ‎.qsc‎ ويبقى الأصل كما هو.")
+                2 -> Note("وصّل الفلاشة أو الهارد بالجوال بوصلة OTG، ثم اختره من تبويب «الأقراص» واضغط «تشفير». تُدعم صيغ VeraCrypt وBitLocker وQsCrypt وTrueCrypt، والقرص يُمسح بالكامل.", icon = R.drawable.ic_usb)
+                else -> Note("يُشفَّر الملف أولاً بـ QsCrypt ثم يُخفى في بكسلات صورة تختارها، فتبدو صورة عادية. أرسلها «كملف» لا «كصورة»، لأن تطبيقات المراسلة تضغط الصور فيضيع المخفي.", icon = R.drawable.ic_image)
             }
             Gap(20.dp)
         }
-        PrimaryButton("التالي") {
-            when {
-                target == 1 -> AppState.push(Screen.QscEncrypt)
-                format == "TrueCrypt" -> AppState.push(Screen.NewContainer(truecrypt = true))
-                else -> AppState.push(Screen.NewContainer(truecrypt = false))
+        Column(Modifier.padding(horizontal = 20.dp)) {
+            PrimaryButton(if (target == 2) "اذهب إلى الأقراص" else "التالي") {
+                when (target) {
+                    0 -> AppState.push(Screen.NewContainer(format))
+                    1 -> AppState.push(Screen.QscEncrypt)
+                    2 -> AppState.tab(Screen.Drives)
+                    else -> AppState.push(Screen.Stego)
+                }
             }
+            Gap(24.dp)
         }
-        Gap(24.dp)
     }
-    soon?.let { s -> QsAlert("قريباً", s, "حسناً", { soon = null }, { soon = null }, dismiss = null) }
 }
 
-// ------------------------------------------------------------------ containers
+// ------------------------------------------------------------------ containers and drives
 
-private val SIZES = listOf(100L to "100 MB", 500L to "500 MB", 1024L to "1 GB", 4096L to "4 GB")
+private val SIZES = listOf(100L to "100 MB", 500L to "500 MB", 1024L to "1 GB", 4096L to "4 GB", 16384L to "16 GB")
 private val VC_PRFS = listOf(1 to "SHA-512", 2 to "SHA-256", 3 to "Whirlpool")
 private val TC_PRFS = listOf(1 to "SHA-512", 4 to "RIPEMD-160", 3 to "Whirlpool")
 private val EAS = listOf(1 to "AES", 2 to "Serpent", 3 to "Twofish", 4 to "AES-Twofish", 5 to "AES-Twofish-Serpent", 6 to "Serpent-AES", 7 to "Serpent-Twofish-AES", 8 to "Twofish-Serpent")
+private val BDE_METHODS = listOf("xts128" to "XTS-AES 128", "xts256" to "XTS-AES 256", "cbc128" to "AES-CBC 128", "cbc256" to "AES-CBC 256")
+private const val MIB = 1024L * 1024L
+private const val MIN_HIDDEN = MIB + 131_072L
+
+private fun extensionFor(format: String) = when (format) {
+    "TrueCrypt" -> ".tc"
+    "BitLocker" -> ".vhd"
+    "QsCrypt" -> ".qsv"
+    else -> ".hc"
+}
+
+/** Cards of everyone who may open a QsCrypt file or container (and mine, if asked). */
+fun recipientCards(context: android.content.Context, p: Protection): JSONArray {
+    val cards = JSONArray()
+    p.recipients.forEach { cards.put(it.card) }
+    if (p.recipients.isNotEmpty() && p.includeMe) Identity.public(context)?.optString("card")?.takeIf { it.isNotEmpty() }?.let { cards.put(it) }
+    return cards
+}
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun NewContainerScreen(truecrypt: Boolean) {
+fun NewContainerScreen(format: String, usb: UsbTarget? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var name by remember { mutableStateOf("خزنتي") }
-    var sizeMb by remember { mutableStateOf(500L) }
+    val tc = format == "TrueCrypt"
+    val vc = format == "VeraCrypt" || tc
+    val bitlocker = format == "BitLocker"
+    val qs = format == "QsCrypt"
+    val engineFormat = format.lowercase()
+    var name by remember { mutableStateOf(if (bitlocker) "قرصي" else "خزنتي") }
+    var sizeMb by remember { mutableLongStateOf(if (bitlocker) 1024L else 500L) }
     var custom by remember { mutableStateOf("") }
+    var fs by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var confirm by remember { mutableStateOf("") }
     var pim by remember { mutableStateOf("") }
     var ea by remember { mutableIntStateOf(1) }
     var prf by remember { mutableIntStateOf(1) }
+    var method by remember { mutableStateOf("xts128") }
+    var quick by remember { mutableStateOf(false) }
+    val keyfiles = remember { mutableStateListOf<Keyfile>() }
+    var hidden by remember { mutableStateOf(false) }
+    var hiddenMb by remember { mutableStateOf("") }
+    var hiddenPassword by remember { mutableStateOf("") }
+    var hiddenConfirm by remember { mutableStateOf("") }
+    var hiddenPim by remember { mutableStateOf("") }
+    val hiddenKeyfiles = remember { mutableStateListOf<Keyfile>() }
+    var maxHidden by remember { mutableLongStateOf(0L) }
+    val protection = remember { Protection() }
+    var advanced by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf<Busy?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
+    var confirmErase by remember { mutableStateOf(false) }
+    var recovery by remember { mutableStateOf<Pair<String, CompletableDeferred<Unit>>?>(null) }
     val cancel = remember { AtomicBoolean(false) }
     val selfTest = AppState.selfTest
-    val formatName = if (truecrypt) "TrueCrypt" else "VeraCrypt"
-    val extension = if (truecrypt) ".tc" else ".hc"
-    val bytes = (custom.toLongOrNull() ?: sizeMb) * 1024 * 1024
-    val valid = name.isNotBlank() && password.isNotEmpty() && password == confirm && bytes >= 2L * 1024 * 1024
+    val hasIdentity = remember { Identity.exists(context) }
 
-    val creator = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
+    val bytes = usb?.size ?: ((custom.toLongOrNull() ?: sizeMb) * MIB)
+    val fsChoice = fs.ifEmpty { if (bytes >= 4096L * MIB) "exfat" else "fat" }
+    val minBytes = when {
+        bitlocker -> 65L * MIB
+        qs -> 4L * MIB
+        else -> 2L * MIB
+    }
+    val hiddenBytes = (hiddenMb.toLongOrNull() ?: 0L) * MIB
+    val pimValue = if (vc && !tc) pim.toIntOrNull() ?: 0 else 0
+    val passwordOk = when {
+        bitlocker -> password.length >= 8 && password == confirm
+        qs -> password == confirm && (password.isNotEmpty() || protection.recipients.isNotEmpty())
+        else -> password == confirm && (password.isNotEmpty() || keyfiles.isNotEmpty())
+    }
+    val hiddenOk = !hidden || (
+        maxHidden > 0 && hiddenBytes >= MIN_HIDDEN && hiddenBytes <= maxHidden &&
+            (hiddenPassword.isNotEmpty() || hiddenKeyfiles.isNotEmpty()) && hiddenPassword == hiddenConfirm && hiddenPassword != password
+        )
+    val duressOk = !qs || !protection.duress || (protection.duressPassword.isNotEmpty() && protection.duressPassword != password)
+    val valid = (usb != null || name.isNotBlank()) && bytes >= minBytes && passwordOk && hiddenOk && duressOk
+
+    LaunchedEffect(hidden, bytes, fsChoice) {
+        if (!hidden || !vc) return@LaunchedEffect
+        val r = withContext(Dispatchers.IO) { Call("volume.maxHidden").put("size", bytes).put("fs", fsChoice).run() }
+        maxHidden = if (r.ok) r.json.optLong("max") else -1L
+    }
+
+    fun progress() = Progress { d, t ->
+        busy = busy?.copy(fraction = if (t > 0) d.toFloat() / t else null)
+        !cancel.get()
+    }
+
+    fun create(uri: Uri?) {
         cancel.set(false)
         val pw = password.toByteArray(Charsets.UTF_8)
-        val pimValue = if (truecrypt) 0 else pim.toIntOrNull() ?: 0
-        busy = Busy("إنشاء الحاوية", 0f, "تُكتب الحاوية كاملة مشفّرة، وقد يستغرق ذلك دقائق للأحجام الكبيرة.")
+        val hpw = hiddenPassword.toByteArray(Charsets.UTF_8)
+        busy = Busy(
+            if (usb != null) "تشفير القرص" else "إنشاء الحاوية",
+            0f,
+            if (quick) "تهيئة سريعة: تُكتب البيانات الوصفية فقط." else "يُكتب القرص كاملاً مشفّراً، وقد يستغرق ذلك دقائق للأحجام الكبيرة.",
+        )
         scope.launch {
+            val target: UsbTarget? = if (usb != null && bitlocker && usb.start == 0L) {
+                // BitLocker on a whole drive: Windows expects a partition.
+                val s = UsbDrives.sessions.firstOrNull { it.handle == usb.handle }
+                val r = withContext(Dispatchers.IO) { s?.let { UsbDrives.partition(it, 0x07) } }
+                val p = r?.json?.optJSONArray("partitions")?.optJSONObject(0)
+                if (r == null || !r.ok || p == null) {
+                    busy = null
+                    pw.fill(0)
+                    hpw.fill(0)
+                    message = "تعذّر إنشاء قسم على القرص: ${r?.error ?: "الفلاشة غير متصلة"}"
+                    return@launch
+                }
+                UsbTarget(usb.handle, p.optLong("start"), p.optLong("size"), "القسم 1", "empty")
+            } else {
+                usb
+            }
             val created = withContext(Dispatchers.IO) {
-                val pfd = Saf.open(context, uri, "rw") ?: return@withContext Reply("{\"ok\":false,\"code\":\"io\",\"message\":\"open\"}")
-                pfd.use {
-                    Reply(QsCore.createVolume(it.fd, bytes, pw, pimValue, prf, ea, if (truecrypt) 2 else 1, name, Progress { d, t ->
-                        busy = busy?.copy(fraction = if (t > 0) d.toFloat() / t else null)
-                        !cancel.get()
-                    }))
+                val call = Call("volume.create").put("format", engineFormat).put("size", bytes).put("fs", fsChoice)
+                    .put("label", if (usb != null) "QsCrypt" else name.trim()).put("quick", quick && !hidden && !qs)
+                when {
+                    vc -> {
+                        call.put("ea", ea).put("prf", prf).put("pim", pimValue)
+                            .blob("password", pw.copyOf()).blob("keyfiles", packKeyfiles(context, keyfiles))
+                        if (hidden) {
+                            val h = JSONObject().put("size", hiddenBytes).put("password", call.blobIndex(hpw.copyOf()))
+                                .put("pim", hiddenPim.toIntOrNull() ?: 0).put("ea", ea)
+                                .put("fs", if (hiddenBytes >= 4096L * MIB) "exfat" else "fat").put("label", "")
+                            packKeyfiles(context, hiddenKeyfiles)?.let { h.put("keyfiles", call.blobIndex(it)) }
+                            call.put("hidden", h)
+                        }
+                    }
+                    bitlocker -> call.put("method", method).put("description", "QsCrypt").put("vhd", target == null).blob("password", pw.copyOf())
+                    else -> {
+                        call.blob("password", if (pw.isNotEmpty()) pw.copyOf() else null)
+                            .put("recovery", protection.recovery).put("recipients", recipientCards(context, protection)).put("policy", protection.policy())
+                        if (protection.duress && protection.duressPassword.isNotEmpty()) call.blob("duress", protection.duressPassword.toByteArray(Charsets.UTF_8))
+                    }
+                }
+                if (target != null) {
+                    call.srcUsb(target).run(progress())
+                } else {
+                    Saf.open(context, uri!!, "rw")?.use { call.src(it.fd).run(progress()) }
+                        ?: Reply("""{"ok":false,"code":"io","message":"cannot open the new file"}""")
                 }
             }
             if (!created.ok) {
                 pw.fill(0)
+                hpw.fill(0)
                 busy = null
-                Saf.delete(context, uri)
-                message = if (created.code == "cancelled") null else "تعذّر إنشاء الحاوية: ${created.error}\nتأكد من وجود مساحة كافية واختر موقعاً على الجهاز أو الفلاشة."
+                if (uri != null) Saf.delete(context, uri)
+                message = when (created.code) {
+                    "cancelled" -> null
+                    else -> "تعذّر الإنشاء: ${created.error}" + if (usb == null) "\nتأكد من وجود مساحة كافية واختر موقعاً على الجهاز أو الفلاشة." else ""
+                }
                 return@launch
             }
-            Saf.persist(context, uri)
-            val meta = Saf.meta(context, uri)
-            val container = AppState.addContainer(Container(uri.toString(), meta.name, bytes, System.currentTimeMillis(), formatName, created.json.optString("ea"), ""))
-            busy = Busy("فتح الحاوية", null)
-            val tz = TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60_000
+            val drive = target?.let { t -> UsbDrives.sessions.firstOrNull { it.handle == t.handle } }
+            val container = if (target != null && drive != null) {
+                withContext(Dispatchers.IO) { UsbDrives.refresh(drive) }
+                UsbDrives.container(drive, target).copy(format = format, ea = created.json.optString("ea"))
+            } else {
+                Saf.persist(context, uri!!)
+                val meta = Saf.meta(context, uri)
+                AppState.addContainer(Container(uri.toString(), meta.name, meta.size.takeIf { it > 0 } ?: bytes, System.currentTimeMillis(), format, created.json.optString("ea"), fsChoice))
+            }
+            val key = created.json.optString("recovery")
+            if (key.isNotEmpty()) {
+                busy = null
+                val ack = CompletableDeferred<Unit>()
+                recovery = key to ack
+                ack.await()
+                recovery = null
+            }
+            if (qs && pw.isEmpty() && !(protection.includeMe && hasIdentity && protection.recipients.isNotEmpty())) {
+                // Only the recipients can open it; nothing more to do here.
+                busy = null
+                message = "تم إنشاء الحاوية. لا يفتحها إلا من اخترتهم من جهات الاتصال."
+                AppState.replaceTop(Screen.Home)
+                return@launch
+            }
+            busy = Busy(if (usb != null) "فتح القرص" else "فتح الحاوية", null)
             val opened = withContext(Dispatchers.IO) {
-                Saf.open(context, uri, "rw")?.use { Reply(QsCore.openVolume(it.fd, pw, pimValue, prf, if (truecrypt) 2 else 1, false, tz)) }
+                val call = Call("volume.open").put("readOnly", false).put("tz", tzMinutes()).put("format", engineFormat)
+                    .put("pim", pimValue).put("prf", if (vc) prf else 0)
+                when {
+                    qs && pw.isEmpty() -> call.put("unlock", "identity").blob("identity", Identity.secret(context))
+                    else -> call.put("unlock", "password").blob("password", pw.copyOf()).blob("keyfiles", if (vc) packKeyfiles(context, keyfiles) else null)
+                }
+                if (hidden) {
+                    call.put("protectHidden", true).blob("hiddenPassword", hpw.copyOf()).put("hiddenPim", hiddenPim.toIntOrNull() ?: 0)
+                        .blob("hiddenKeyfiles", packKeyfiles(context, hiddenKeyfiles))
+                }
+                call.context()
+                if (target != null) call.srcUsb(target).run()
+                else Saf.open(context, uri!!, "rw")?.use { call.src(it.fd).run() } ?: Reply("""{"ok":false,"code":"io","message":"open"}""")
             }
             pw.fill(0)
+            hpw.fill(0)
             busy = null
-            password = ""
-            confirm = ""
-            if (opened != null && opened.ok) {
+            if (opened.ok) {
                 val info = VolumeInfo.from(opened.json)
-                val c = container.copy(fs = info.fs)
-                AppState.updateContainer(c)
-                AppState.sessions.add(Session(info.handle, c, info, System.currentTimeMillis()))
-                AppState.stack.clear()
-                AppState.stack.add(Screen.Home)
-                AppState.stack.add(Screen.Vault(info.handle))
+                AppState.sessions.add(Session(info.handle, container, info, System.currentTimeMillis(), target))
+                AppState.replaceTop(Screen.Vault(info.handle))
             } else {
-                AppState.stack.clear()
-                AppState.stack.add(Screen.Home)
-                AppState.stack.add(Screen.Unlock(container))
+                message = "تم الإنشاء، لكن تعذّر فتحه الآن: ${opened.error}"
+                AppState.replaceTop(Screen.Home)
             }
         }
     }
 
-    Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+    val creator = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        if (uri != null) create(uri)
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
             Gap(20.dp)
-            TopBar("حاوية $formatName جديدة", onBack = { AppState.pop() }) { Text("2/3", style = T.mono.copy(fontSize = 12.sp)) }
+            TopBar(if (usb != null) "تشفير قرص · $format" else "حاوية $format جديدة", onBack = { AppState.pop() })
             Gap(10.dp)
             StepBar(2, 3)
             Gap(20.dp)
-            Text("اسم الحاوية", style = T.label)
-            Gap(8.dp)
-            QsField(value = name, onValueChange = { name = it.take(60) }, placeholder = "خزنتي")
-            Gap(18.dp)
-            Text("الحجم", style = T.label)
-            Gap(8.dp)
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                SIZES.forEach { (mb, label) ->
-                    Chip(label, custom.isEmpty() && sizeMb == mb) {
-                        sizeMb = mb
-                        custom = ""
-                    }
-                }
-            }
-            Gap(10.dp)
-            QsField(
-                value = custom,
-                onValueChange = { v -> custom = v.filter { it.isDigit() }.take(7) },
-                placeholder = "حجم مخصص بالميغابايت",
-                keyboardType = KeyboardType.Number,
-                height = 48.dp,
-                trailing = { Text("MB", style = T.mono, modifier = Modifier.padding(end = 12.dp)) },
-            )
-            Gap(6.dp)
-            Text("نظام الملفات: FAT (أقصى حجم للملف الواحد 4GB). exFAT قادم.", style = T.small)
-            Gap(20.dp)
-            PasswordPair(password, confirm, { password = it }, { confirm = it })
-            Gap(20.dp)
-            Text("الخوارزمية", style = T.label)
-            Gap(8.dp)
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                EAS.forEach { (id, label) ->
-                    // Only offer algorithms that passed VeraCrypt's own known-answer test on this device.
-                    val ok = id == 1 || selfTest?.passed(label) == true
-                    if (ok) Chip(label, ea == id) { ea = id }
-                }
-            }
-            Gap(16.dp)
-            Text("اشتقاق المفتاح (PRF)", style = T.label)
-            Gap(8.dp)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                (if (truecrypt) TC_PRFS else VC_PRFS).forEach { (id, label) -> Chip(label, prf == id) { prf = id } }
-            }
-            if (!truecrypt) {
-                Gap(16.dp)
-                OptionRow(R.drawable.ic_key, "PIM (اختياري)", "رقم يزيد قوة الاشتقاق، ويجب إدخاله عند كل فتح") {
-                    QsField(
-                        value = pim,
-                        onValueChange = { v -> pim = v.filter { it.isDigit() }.take(5) },
-                        placeholder = "—",
-                        keyboardType = KeyboardType.NumberPassword,
-                        height = 40.dp,
-                        modifier = Modifier.width(92.dp),
-                        textStyle = T.monoLarge,
-                    )
-                }
-            } else {
-                Gap(12.dp)
-                Note("TrueCrypt يستخدم 1000 دورة اشتقاق فقط، فكلمة المرور أسهل تخميناً بكثير من VeraCrypt. استخدمه للتوافق فقط.", icon = R.drawable.ic_alert, color = Qs.coral)
-            }
-            Gap(20.dp)
-        }
-        PrimaryButton("إنشاء الحاوية (${humanSize(bytes)})", icon = R.drawable.ic_lock, enabled = valid) {
-            AppState.pickerOpen = true
-            val file = name.trim().let { if (it.endsWith(extension, ignoreCase = true)) it else it + extension }
-            creator.launch(file)
-        }
-        Gap(24.dp)
-    }
-    busy?.let { b -> ProgressDialog(b.title, b.fraction, b.detail, onCancel = if (b.fraction != null) ({ cancel.set(true) }) else null) }
-    message?.let { m -> QsAlert("QsCrypt", m, "حسناً", { message = null }, { message = null }, dismiss = null) }
-}
-
-// ------------------------------------------------------------------ QsCrypt files
-
-private data class Picked(val uri: Uri, val name: String, val size: Long)
-
-private data class Policy(val icon: Int, val title: String, val desc: String, val risk: String, val destroys: Boolean)
-
-private val POLICIES = listOf(
-    Policy(R.drawable.ic_wifioff, "بلا إنترنت فقط", "تُتلف إذا فُتحت والجهاز متصل بالشبكة", "إن فتحها المستلم وجواله متصل بالإنترنت، تُتلف المفاتيح فوراً ولا يمكن استرجاع الملف أبداً، حتى لو كان الاتصال غير مقصود.", true),
-    Policy(R.drawable.ic_eye, "فتح لمرة واحدة", "يُتلف المفتاح نهائياً بعد أول فتح", "بعد أول فتح ناجح يُتلف مفتاح الفك المخزّن في عتاد جهاز المستلم، فلا يمكن فتح الملف مرة ثانية على أي جهاز.", true),
-    Policy(R.drawable.ic_clock, "مدة الصلاحية", "تُحسب من وقت الإصدار، والتلاعب بالوقت يُتلفها", "بعد انتهاء المدة، أو إن اكتُشف تغيير ساعة الجهاز للخلف، يُتلف المفتاح.", true),
-    Policy(R.drawable.ic_key, "عدد المحاولات", "إتلاف بعد عدد محاولات خاطئة تحدده أنت", "يحمي من التخمين، لكن صاحب الحق قد يُتلف الملف بنفسه إن أخطأ كلمة المرور مرات كثيرة.", true),
-    Policy(R.drawable.ic_shield, "كلمة مرور الطوارئ", "تفتح حاوية تمويه أو تُتلف المفاتيح بصمت", "إن أُجبرت على كشف كلمة المرور، تعطي كلمة الطوارئ فتنفتح بيانات تمويه أو تُتلف الحقيقية دون أي إشارة.", true),
-    Policy(R.drawable.ic_unlock, "الفتح التلقائي", "بعد أول فتح ناجح على جهاز المستلم", "يريح المستلم، لكن من يمسك جواله مفتوحاً يستطيع فتح الملف دون كلمة مرور.", false),
-)
-
-@Composable
-fun QscEncryptScreen() {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var step by remember { mutableIntStateOf(2) }
-    val files = remember { mutableStateListOf<Picked>() }
-    var password by remember { mutableStateOf("") }
-    var confirm by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf<Busy?>(null) }
-    var message by remember { mutableStateOf<String?>(null) }
-    var policy by remember { mutableStateOf<Policy?>(null) }
-    val cancel = remember { AtomicBoolean(false) }
-
-    BackHandler(enabled = step == 3) { step = 2 }
-
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        for (u in uris) {
-            if (files.none { it.uri == u }) {
-                val m = Saf.meta(context, u)
-                files.add(Picked(u, m.name, m.size))
-            }
-        }
-    }
-
-    val folder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
-        if (tree == null) return@rememberLauncherForActivityResult
-        cancel.set(false)
-        val pw = password.toByteArray(Charsets.UTF_8)
-        scope.launch {
-            var done = 0
-            var failure: String? = null
-            for ((i, f) in files.withIndex()) {
-                busy = Busy("تشفير (${i + 1}/${files.size})", 0f, f.name)
-                val r = withContext(Dispatchers.IO) { encryptOne(context, tree, f, pw, cancel) { d, t -> busy = busy?.copy(fraction = if (t > 0) d.toFloat() / t else null) } }
-                if (!r.ok) {
-                    failure = if (r.code == "cancelled") null else "«${f.name}»: ${r.error}"
-                    break
-                }
-                done++
-            }
-            pw.fill(0)
-            busy = null
-            if (failure != null) {
-                message = failure
-            } else if (done > 0) {
-                password = ""
-                confirm = ""
-                files.clear()
-                message = "تم تشفير $done ${if (done == 1) "ملف" else "ملفات"} بصيغة QsCrypt.\nالملفات الأصلية لم تُحذف؛ احذفها بنفسك إن لم تعد تحتاجها."
-                step = 2
-            }
-        }
-    }
-
-    Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            Gap(20.dp)
-            TopBar(if (step == 2) "تشفير ملفات" else "مزايا الحماية", onBack = { if (step == 3) step = 2 else AppState.pop() }) {
-                Text("$step/3", style = T.mono.copy(fontSize = 12.sp))
-            }
-            Gap(10.dp)
-            StepBar(step, 3)
-            Gap(18.dp)
-            if (step == 2) {
-                Text("الملفات", style = T.label)
-                Gap(8.dp)
-                files.forEach { f ->
-                    Row(Modifier.fillMaxWidth().height(56.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Tile(R.drawable.ic_file, Qs.ivory, size = 38.dp, radius = 12.dp, iconSize = 19.dp)
+            if (usb != null) {
+                QsCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Tile(R.drawable.ic_usb, Qs.coral, size = 46.dp, radius = 15.dp)
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(f.name, style = T.item, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(humanSize(f.size), style = T.mono)
+                            Text(usb.title, style = T.itemLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(humanSize(usb.size), style = T.mono.copy(fontSize = 12.sp))
                         }
-                        IconBtn(R.drawable.ic_close, "إزالة", tint = Qs.muted) { files.remove(f) }
                     }
                 }
-                SecondaryButton(if (files.isEmpty()) "اختر الملفات" else "أضف ملفات أخرى", icon = R.drawable.ic_plus) {
-                    AppState.pickerOpen = true
-                    picker.launch(arrayOf("*/*"))
-                }
-                Gap(22.dp)
-                PasswordPair(password, confirm, { password = it }, { confirm = it })
-            } else {
-                Text("كل المزايا مطفأة افتراضياً. فعّل ما تحتاجه فقط، وسيشرح لك التطبيق عواقب كل ميزة قبل تفعيلها.", style = T.body.copy(color = Qs.muted))
-                Gap(18.dp)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("يفتحها فقط", style = T.label, modifier = Modifier.weight(1f))
-                    ComingSoonTag()
-                }
-                Gap(8.dp)
-                Text("ربط الملف بجهات اتصال محددة عبر رمز QR يأتي مع شاشة جهات الاتصال.", style = T.small)
-                Gap(16.dp)
-                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Qs.surface)) {
-                    POLICIES.forEachIndexed { i, p ->
-                        Row(
-                            Modifier.fillMaxWidth().clickable { policy = p }.padding(horizontal = 16.dp, vertical = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Tile(p.icon, Qs.muted, size = 40.dp, radius = 13.dp, iconSize = 20.dp)
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(p.title, style = T.item)
-                                    if (p.destroys) {
-                                        Spacer(Modifier.width(8.dp))
-                                        Tag("إتلاف", TagKind.Coral)
-                                    }
-                                }
-                                Text(p.desc, style = T.small)
-                            }
-                            Spacer(Modifier.width(8.dp))
-                            QsSwitch(false, enabled = false) {}
-                        }
-                        if (i < POLICIES.size - 1) Box(Modifier.fillMaxWidth().height(1.dp).background(Qs.line))
-                    }
-                }
-                Gap(12.dp)
-                Note("هذه المزايا قيد البناء وستُفعَّل في الإصدارات القادمة. الملف الآن يُشفَّر بكلمة المرور وحدها.", icon = R.drawable.ic_info)
-            }
-            Gap(20.dp)
-        }
-        if (step == 2) {
-            PrimaryButton("التالي", enabled = files.isNotEmpty() && password.isNotEmpty() && password == confirm) { step = 3 }
-        } else {
-            PrimaryButton("اختر مكان الحفظ وشفّر", icon = R.drawable.ic_lock) {
-                AppState.pickerOpen = true
-                folder.launch(null)
-            }
-        }
-        Gap(24.dp)
-    }
-    busy?.let { b -> ProgressDialog(b.title, b.fraction, b.detail, onCancel = { cancel.set(true) }) }
-    message?.let { m -> QsAlert("QsCrypt", m, "حسناً", { message = null }, { message = null }, dismiss = null) }
-    policy?.let { p -> QsAlert(p.title, p.risk + "\n\nهذه الميزة قادمة في الإصدار التالي.", "فهمت", { policy = null }, { policy = null }, dismiss = null) }
-}
-
-private fun encryptOne(context: Context, tree: Uri, f: Picked, pw: ByteArray, cancel: AtomicBoolean, onProgress: (Long, Long) -> Unit): Reply {
-    val out = Saf.createInTree(context, tree, f.name + ".qsc") ?: return Reply("{\"ok\":false,\"code\":\"io\",\"message\":\"create\"}")
-    val input = Saf.open(context, f.uri, "r")
-    val output = Saf.open(context, out, "w")
-    if (input == null || output == null) {
-        input?.close()
-        output?.close()
-        Saf.delete(context, out)
-        return Reply("{\"ok\":false,\"code\":\"io\"}")
-    }
-    val r = input.use { i ->
-        output.use { o ->
-            Reply(QsCore.qscEncrypt(i.fd, f.size, o.fd, f.name, System.currentTimeMillis() / 1000, pw, Progress { d, t ->
-                onProgress(d, t)
-                !cancel.get()
-            }))
-        }
-    }
-    if (!r.ok) Saf.delete(context, out)
-    return r
-}
-
-@Composable
-fun QscDecryptScreen(uriString: String, name: String, size: Long) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val uri = remember(uriString) { Uri.parse(uriString) }
-    var password by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
-    var busy by remember { mutableStateOf<Busy?>(null) }
-    var message by remember { mutableStateOf<String?>(null) }
-    val cancel = remember { AtomicBoolean(false) }
-    var original by remember { mutableStateOf<String?>(null) }
-
-    val saver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { out ->
-        if (out == null) return@rememberLauncherForActivityResult
-        cancel.set(false)
-        val pw = password.toByteArray(Charsets.UTF_8)
-        busy = Busy("فك التشفير", 0f, original ?: name)
-        scope.launch {
-            val r = withContext(Dispatchers.IO) {
-                val input = Saf.open(context, uri, "r")
-                val output = Saf.open(context, out, "w")
-                if (input == null || output == null) {
-                    input?.close()
-                    output?.close()
-                    Reply("{\"ok\":false,\"code\":\"io\"}")
-                } else {
-                    input.use { i -> output.use { o -> Reply(QsCore.qscDecrypt(i.fd, o.fd, pw, Progress { d, t -> busy = busy?.copy(fraction = if (t > 0) d.toFloat() / t else null); !cancel.get() })) } }
-                }
-            }
-            pw.fill(0)
-            busy = null
-            if (r.ok) {
-                password = ""
-                message = "تم فك التشفير وحفظ «${r.json.optString("name")}». النسخة المحفوظة غير مشفّرة."
-            } else {
-                Saf.delete(context, out)
-                if (r.code != "cancelled") error = r.error
-            }
-        }
-    }
-
-    fun start() {
-        if (password.isEmpty()) return
-        error = null
-        busy = Busy("التحقق من كلمة المرور", null)
-        val pw = password.toByteArray(Charsets.UTF_8)
-        scope.launch {
-            val r = withContext(Dispatchers.IO) { Saf.open(context, uri, "r")?.use { Reply(QsCore.qscDecrypt(it.fd, -1, pw, null)) } }
-            pw.fill(0)
-            busy = null
-            when {
-                r == null -> error = "تعذّر فتح الملف."
-                !r.ok -> error = if (r.code == "wrong_password") "كلمة المرور غير صحيحة، أو أن الملف معدّل." else r.error
-                else -> {
-                    val suggested = r.json.optString("name").ifBlank { name.removeSuffix(".qsc") }
-                    original = suggested
-                    AppState.pickerOpen = true
-                    saver.launch(suggested)
-                }
-            }
-        }
-    }
-
-    Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            Gap(20.dp)
-            TopBar("فك ملف QsCrypt", onBack = { AppState.pop() })
-            Gap(18.dp)
-            QsCard {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Tile(R.drawable.ic_shield, Qs.brass, size = 50.dp, radius = 16.dp, iconSize = 24.dp)
-                    Spacer(Modifier.width(14.dp))
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Text(name, style = T.itemLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(Saf.location(uri), style = T.small, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    Text(humanSize(size), style = T.mono.copy(fontSize = 12.sp))
-                }
-            }
-            Gap(12.dp)
-            Note("ملف بصيغة QsCrypt: اسمه الأصلي ومحتواه مشفّران بثلاث طبقات. بعد التحقق من كلمة المرور ستختار أين تحفظ النسخة المفكوكة.")
-            Gap(22.dp)
-            Text("كلمة المرور", style = T.label)
-            Gap(8.dp)
-            QsField(value = password, onValueChange = { password = it; error = null }, placeholder = "••••••••••••", password = true, highlighted = true)
-            if (error != null) {
                 Gap(10.dp)
-                Note(error!!, icon = R.drawable.ic_alert, color = Qs.coral, background = Qs.warm, border = Qs.coral)
+                Note("سيُمسح كل ما على هذا القرص نهائياً. انسخ ملفاتك المهمة منه قبل المتابعة.", icon = R.drawable.ic_alert, color = Qs.coral, background = Qs.warm, border = Qs.coral)
+                if (bitlocker && usb.start == 0L) {
+                    Gap(8.dp)
+                    Text("سيُنشأ قسم واحد يشغل القرص كله، كما يفعل ويندوز.", style = T.small)
+                }
+                Gap(18.dp)
+            } else {
+                Text(if (bitlocker) "اسم الملف" else "اسم الحاوية", style = T.label)
+                Gap(8.dp)
+                QsField(value = name, onValueChange = { name = it.take(60) }, placeholder = "خزنتي")
+                Gap(18.dp)
+                Text("الحجم", style = T.label)
+                Gap(8.dp)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SIZES.forEach { (mb, label) ->
+                        Chip(label, custom.isEmpty() && sizeMb == mb) {
+                            sizeMb = mb
+                            custom = ""
+                        }
+                    }
+                }
+                Gap(10.dp)
+                QsField(
+                    value = custom,
+                    onValueChange = { v -> custom = v.filter { it.isDigit() }.take(7) },
+                    placeholder = "حجم مخصص بالميغابايت",
+                    keyboardType = KeyboardType.Number,
+                    height = 48.dp,
+                    trailing = { Text("MB", style = T.mono, modifier = Modifier.padding(end = 12.dp)) },
+                )
+                if (bytes < minBytes) {
+                    Gap(6.dp)
+                    Text("أقل حجم لهذه الصيغة ${humanSize(minBytes)}.", style = T.small.copy(color = Qs.coral))
+                }
+                Gap(18.dp)
+            }
+            Text("نظام الملفات", style = T.label)
+            Gap(8.dp)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Chip("FAT", fsChoice == "fat") { fs = "fat" }
+                Chip("exFAT", fsChoice == "exfat") { fs = "exfat" }
+            }
+            Gap(6.dp)
+            Text(
+                if (fsChoice == "fat") "FAT يعمل في كل مكان، وأقصى حجم للملف الواحد 4GB." else "exFAT بلا حد عملي لحجم الملف، ويعمل على ويندوز وماك وأندرويد الحديث.",
+                style = T.small,
+            )
+            Gap(20.dp)
+            if (qs) {
+                Text("كلمة المرور اختيارية إن ربطته بجهات اتصال.", style = T.small)
+                Gap(8.dp)
+            }
+            PasswordPair(password, confirm, { password = it }, { confirm = it })
+            if (bitlocker && password.isNotEmpty() && password.length < 8) {
+                Gap(6.dp)
+                Text("BitLocker يشترط 8 أحرف على الأقل.", style = T.small.copy(color = Qs.coral))
+            }
+            if (vc) {
+                Gap(8.dp)
+                KeyfilesRow(keyfiles)
+            }
+            Gap(20.dp)
+            when {
+                vc -> {
+                    Text("الخوارزمية", style = T.label)
+                    Gap(8.dp)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        EAS.forEach { (id, label) ->
+                            // Only offer algorithms that passed VeraCrypt's own known-answer test on this device.
+                            val ok = id == 1 || selfTest?.passed(label) == true
+                            if (ok) Chip(label, ea == id) { ea = id }
+                        }
+                    }
+                    Gap(16.dp)
+                    Text("اشتقاق المفتاح (PRF)", style = T.label)
+                    Gap(8.dp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        (if (tc) TC_PRFS else VC_PRFS).forEach { (id, label) -> Chip(label, prf == id) { prf = id } }
+                    }
+                    if (!tc) {
+                        Gap(16.dp)
+                        OptionRow(R.drawable.ic_key, "PIM (اختياري)", "رقم يزيد قوة الاشتقاق، ويجب إدخاله عند كل فتح") {
+                            QsField(value = pim, onValueChange = { v -> pim = v.filter { it.isDigit() }.take(5) }, placeholder = "—", keyboardType = KeyboardType.NumberPassword, height = 40.dp, modifier = Modifier.width(92.dp), textStyle = T.monoLarge)
+                        }
+                    } else {
+                        Gap(12.dp)
+                        Note("TrueCrypt يستخدم 1000 دورة اشتقاق فقط، فكلمة المرور أسهل تخميناً بكثير من VeraCrypt. استخدمه للتوافق فقط.", icon = R.drawable.ic_alert, color = Qs.coral)
+                    }
+                    Gap(8.dp)
+                    OptionRow(R.drawable.ic_eye, "مجلد مخفي", "مجلد ثانٍ بكلمة مرور أخرى لا يمكن إثبات وجوده") { QsSwitch(hidden) { hidden = it } }
+                    if (hidden) {
+                        Column(Modifier.padding(start = 12.dp)) {
+                            Text("إن أُجبرت على كشف كلمة المرور، أعطِ كلمة الحاوية الخارجية: تظهر ملفات عادية تضعها أنت، ويبقى المخفي غير قابل للإثبات.", style = T.small)
+                            if (maxHidden < 0) {
+                                Gap(6.dp)
+                                Text("الحجم صغير جداً لمجلد مخفي. اختر حجماً أكبر.", style = T.small.copy(color = Qs.coral))
+                            }
+                            Gap(10.dp)
+                            QsField(
+                                value = hiddenMb,
+                                onValueChange = { v -> hiddenMb = v.filter { it.isDigit() }.take(7) },
+                                placeholder = if (maxHidden > 0) "حجم المخفي (حتى ${maxHidden / MIB} MB)" else "حجم المخفي",
+                                keyboardType = KeyboardType.Number,
+                                height = 48.dp,
+                                trailing = { Text("MB", style = T.mono, modifier = Modifier.padding(end = 12.dp)) },
+                            )
+                            if (hiddenBytes > 0 && maxHidden > 0 && hiddenBytes > maxHidden) {
+                                Gap(4.dp)
+                                Text("أكبر حجم ممكن ${maxHidden / MIB} MB.", style = T.small.copy(color = Qs.coral))
+                            }
+                            Gap(10.dp)
+                            QsField(value = hiddenPassword, onValueChange = { hiddenPassword = it }, placeholder = "كلمة مرور المجلد المخفي", password = true, height = 50.dp)
+                            Gap(8.dp)
+                            QsField(value = hiddenConfirm, onValueChange = { hiddenConfirm = it }, placeholder = "تأكيدها", password = true, height = 50.dp)
+                            if (hiddenPassword.isNotEmpty() && hiddenPassword == password) {
+                                Gap(4.dp)
+                                Text("يجب أن تختلف عن كلمة مرور الحاوية الخارجية.", style = T.small.copy(color = Qs.coral))
+                            } else if (hiddenConfirm.isNotEmpty() && hiddenConfirm != hiddenPassword) {
+                                Gap(4.dp)
+                                Text("غير متطابقتين", style = T.small.copy(color = Qs.coral))
+                            }
+                            if (!tc) {
+                                OptionRow(R.drawable.ic_key, "PIM المخفي", "اختياري") {
+                                    QsField(value = hiddenPim, onValueChange = { v -> hiddenPim = v.filter { it.isDigit() }.take(5) }, placeholder = "—", keyboardType = KeyboardType.NumberPassword, height = 40.dp, modifier = Modifier.width(92.dp), textStyle = T.monoLarge)
+                                }
+                            }
+                            KeyfilesRow(hiddenKeyfiles, "ملفات مفاتيح المخفي")
+                        }
+                    }
+                }
+                bitlocker -> {
+                    Text("طريقة التشفير", style = T.label)
+                    Gap(8.dp)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        BDE_METHODS.forEach { (id, label) -> Chip(label, method == id) { method = id } }
+                    }
+                    Gap(8.dp)
+                    Text(
+                        if (method.startsWith("xts")) "XTS-AES هو افتراضي ويندوز 10 و11." else "AES-CBC للتوافق مع ويندوز 7 و8.",
+                        style = T.small,
+                    )
+                    Gap(12.dp)
+                    Note(
+                        if (usb != null) "بعد التشفير، ضع الفلاشة في أي حاسوب ويندوز فيطلب كلمة المرور، دون أي برنامج."
+                        else "يُحفظ كملف ‎.vhd‎: على ويندوز انقر عليه مرتين ليظهر كقرص، ثم افتحه بكلمة المرور. ويُفتح على هذا التطبيق أيضاً.",
+                        icon = R.drawable.ic_drive,
+                    )
+                    Gap(6.dp)
+                    Text("سيُعرض بعد الإنشاء مفتاح استرداد من 48 رقماً، يفتحه إن نسيت كلمة المرور.", style = T.small)
+                }
+                else -> ProtectionEditor(protection, container = true, hasIdentity = hasIdentity, hasPassword = password.isNotEmpty())
+            }
+            if (!qs) {
+                Gap(8.dp)
+                Text(
+                    if (advanced) "إخفاء الخيارات المتقدمة" else "خيارات متقدمة",
+                    style = T.label.copy(color = Qs.brass),
+                    modifier = Modifier.clickable { advanced = !advanced }.padding(vertical = 12.dp),
+                )
+                if (advanced) {
+                    OptionRow(R.drawable.ic_clock, "تهيئة سريعة", if (hidden) "غير متاحة مع المجلد المخفي" else "أسرع، لكن المساحة الفارغة لا تُملأ ببيانات عشوائية") {
+                        QsSwitch(quick && !hidden, enabled = !hidden) { quick = it }
+                    }
+                    Text("التهيئة الكاملة تمنع معرفة مقدار ما كُتب في القرص، وهي الأنسب للفلاشات.", style = T.small)
+                }
             }
             Gap(20.dp)
         }
-        PrimaryButton("فك التشفير", icon = R.drawable.ic_unlock, enabled = password.isNotEmpty()) { start() }
-        Gap(24.dp)
+        Column(Modifier.padding(horizontal = 20.dp)) {
+            PrimaryButton(
+                if (usb != null) "تشفير القرص (${humanSize(bytes)})" else "إنشاء (${humanSize(bytes)})",
+                icon = R.drawable.ic_lock,
+                enabled = valid,
+            ) {
+                if (usb != null) {
+                    if (AppState.sessions.any { it.container.uri.startsWith("usb:${usb.handle}:") }) {
+                        message = "أغلق الأقراص المفتوحة من هذه الفلاشة أولاً."
+                    } else {
+                        confirmErase = true
+                    }
+                } else {
+                    AppState.pickerOpen = true
+                    val ext = extensionFor(format)
+                    creator.launch(name.trim().let { if (it.endsWith(ext, ignoreCase = true)) it else it + ext })
+                }
+            }
+            Gap(24.dp)
+        }
+    }
+    if (confirmErase && usb != null) {
+        DangerConfirm(
+            "مسح القرص وتشفيره؟",
+            "سيُمسح كل ما على «${usb.title}» (${humanSize(usb.size)}) نهائياً ولا يمكن التراجع.",
+            "امسح وشفّر",
+            { confirmErase = false; create(null) },
+            { confirmErase = false },
+        )
+    }
+    recovery?.let { (key, ack) ->
+        RecoveryKeyDialog(
+            if (bitlocker) "مفتاح استرداد BitLocker" else "مفتاح الاسترداد",
+            key,
+            if (bitlocker) "يفتح القرص على أي ويندوز وعلى QsCrypt إن نسيت كلمة المرور. احفظه بعيداً عن القرص: اكتبه على ورق أو في مدير كلمات مرور."
+            else "يفتح الحاوية إن نسيت كلمة المرور. احفظه بعيداً عن الحاوية، فمن يملكه يستطيع فتحها.",
+        ) { ack.complete(Unit) }
     }
     busy?.let { b -> ProgressDialog(b.title, b.fraction, b.detail, onCancel = if (b.fraction != null) ({ cancel.set(true) }) else null) }
-    message?.let { m ->
-        QsAlert("QsCrypt", m, "حسناً", {
-            message = null
-            AppState.pop()
-        }, { message = null }, dismiss = null)
-    }
+    message?.let { m -> QsAlert("QsCrypt", m, "حسناً", { message = null }, { message = null }, dismiss = null) }
 }

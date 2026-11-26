@@ -53,6 +53,27 @@ for combo in "exfat xts128" "fat cbc128" "exfat xts256" "fat cbc256"; do
 done
 sudo cryptsetup bitlkDump "$WORK/qs-exfat-xts128.img" || true
 
+echo "== BitLocker inside a VHD (the container Windows mounts natively)"
+for combo in "exfat xts128" "fat cbc256"; do
+  set -- $combo
+  img=$WORK/qs-$1-$2.vhd
+  rp=$("$BDE" vhd "$img" 134217728 "$1" "QsCrypt-Password-1" "$2" 2> "$WORK/err") || { echo "FAIL vhd create $combo: $(cat "$WORK/err")"; fail=1; continue; }
+  if qemu-img info -f vpc "$img" > "$WORK/qi" 2>&1 && grep -q "file format: vpc" "$WORK/qi"; then echo "PASS qemu-img accepts the VHD footer $combo"; else echo "FAIL qemu-img $combo"; cat "$WORK/qi"; fail=1; fi
+  loop=$(sudo losetup -fP --show "$img"); sleep 1
+  sudo cryptsetup bitlkDump "${loop}p1" > "$WORK/dump" 2>&1 || { echo "FAIL bitlkDump vhd $combo"; cat "$WORK/dump"; fail=1; }
+  for cred in "QsCrypt-Password-1" "$rp"; do
+    printf '%s' "$cred" | sudo cryptsetup open --type bitlk --key-file=- "${loop}p1" qsvhd 2> "$WORK/err" || { echo "FAIL open vhd $combo: $(cat "$WORK/err")"; fail=1; continue; }
+    case $1 in exfat) sudo fsck.exfat -n /dev/mapper/qsvhd > "$WORK/fsck" 2>&1 ;; fat) sudo fsck.fat -n /dev/mapper/qsvhd > "$WORK/fsck" 2>&1 ;; esac || { echo "FAIL fsck vhd $combo"; cat "$WORK/fsck"; fail=1; }
+    opts=ro; [ "$1" = fat ] && opts=ro,utf8
+    sudo mount -o "$opts" /dev/mapper/qsvhd "$WORK/mnt" && {
+      hello=$(cat "$WORK/mnt/hello.txt"); n=$(stat -c %s "$WORK/mnt/مجلد/big.bin")
+      [ "$hello" = "QsCrypt BitLocker" ] && [ "$n" = 5000000 ] && echo "PASS VHD partition + cryptsetup + mount $combo" || { echo "FAIL vhd content $combo: $hello $n"; fail=1; }
+      sudo umount "$WORK/mnt"; } || { echo "FAIL vhd mount $combo"; fail=1; }
+    sudo cryptsetup close qsvhd
+  done
+  sudo losetup -d "$loop"
+done
+
 echo "== VeraCrypt volumes made by QsCrypt"
 head -c 4096 /dev/urandom > "$WORK/kf.bin"
 check_vc() { # label image password keyfile(or -) [hidden]

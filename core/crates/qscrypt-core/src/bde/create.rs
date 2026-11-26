@@ -24,6 +24,8 @@ pub struct BdeCreateOptions<'a> {
     pub description: &'a str,
     /// Only metadata is written; free space keeps its old (now garbage) content.
     pub quick: bool,
+    /// Where the volume starts on its disk, in 512-byte sectors (0 if not partitioned).
+    pub hidden_sectors: u32,
 }
 
 const HEADER_COPY: u64 = 8192;
@@ -390,7 +392,7 @@ pub fn create_bitlocker(
     d.write_at(header_offset, &boot)?;
     crate::util::wipe(&mut boot);
     let mut first = vec![0u8; HEADER_COPY as usize];
-    first[..512].copy_from_slice(&volume_header(meta, 0));
+    first[..512].copy_from_slice(&volume_header(meta, opts.hidden_sectors));
     d.write_at(0, &first)?;
 
     // 4. The three metadata copies.

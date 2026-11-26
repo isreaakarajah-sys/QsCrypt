@@ -213,7 +213,7 @@ fun LockScreen() {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var recovery by remember { mutableStateOf(false) }
     // Two-factor: the PIN was right, the phone's lock is next.
-    var secondStep by remember { mutableStateOf(false) }
+    var secondStep by remember { mutableStateOf(AppState.pinPassed && mode == PhoneAuth.Mode.TwoFactor) }
     var phoneError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val lockedFor = (Prefs.lockUntil - now).coerceAtLeast(0)
@@ -221,6 +221,7 @@ fun LockScreen() {
     fun unlocked() {
         Prefs.failCount = 0
         Prefs.lockUntil = 0
+        AppState.pinPassed = false
         AppState.locked = false
     }
 
@@ -270,6 +271,7 @@ fun LockScreen() {
             SecondaryButton("رجوع إلى الرمز") {
                 secondStep = false
                 phoneError = null
+                AppState.pinPassed = false
             }
         }
         LaunchedEffect(Unit) { askPhone() }

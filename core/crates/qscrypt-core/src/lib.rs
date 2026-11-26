@@ -25,6 +25,7 @@ pub mod qvol;
 pub mod usb;
 pub mod util;
 pub mod vc;
+pub mod vhd;
 pub mod xts;
 
 #[cfg(any(test, feature = "reference"))]

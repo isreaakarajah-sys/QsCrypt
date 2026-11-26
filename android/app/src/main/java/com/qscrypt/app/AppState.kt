@@ -12,18 +12,20 @@ sealed interface Screen {
     data object Drives : Screen
     data object Contacts : Screen
     data object Settings : Screen
-    data class Unlock(val container: Container) : Screen
+    data class Unlock(val container: Container, val usb: UsbTarget? = null) : Screen
     data class Vault(val handle: Long, val path: String = "/") : Screen
     data class Viewer(val handle: Long, val path: String, val name: String, val size: Long) : Screen
     data object NewEncryption : Screen
-    data class NewContainer(val truecrypt: Boolean) : Screen
+    /** format: VeraCrypt, TrueCrypt, BitLocker or QsCrypt. */
+    data class NewContainer(val format: String, val usb: UsbTarget? = null) : Screen
     data object QscEncrypt : Screen
     data class QscDecrypt(val uri: String, val name: String, val size: Long) : Screen
     data object About : Screen
+    data object Stego : Screen
 }
 
 /** An unlocked volume. */
-data class Session(val handle: Long, val container: Container, val info: VolumeInfo, val openedAt: Long)
+data class Session(val handle: Long, val container: Container, val info: VolumeInfo, val openedAt: Long, val usb: UsbTarget? = null)
 
 object AppState {
     val stack = mutableStateListOf<Screen>(Screen.Home)
@@ -33,6 +35,8 @@ object AppState {
     var selfTest by mutableStateOf<SelfTest?>(null)
     /** The opening screen is shown once per launch of the app process. */
     var splashDone by mutableStateOf(false)
+    /** The PIN was entered on the disguise calculator; only a second factor may remain. */
+    var pinPassed by mutableStateOf(false)
 
     private var backgroundAt = 0L
 
@@ -121,6 +125,7 @@ object AppState {
     fun lock() {
         if (!Prefs.hasPin()) return
         locked = true
+        pinPassed = false
         if (Prefs.closeVaultsOnLock) closeAll()
     }
 }

@@ -21,7 +21,7 @@ jobs:
           workspaces: core
           key: compat
       - name: Tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq exfatprogs dosfstools ntfs-3g cryptsetup > /dev/null
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq exfatprogs dosfstools ntfs-3g cryptsetup qemu-utils > /dev/null
       - name: Build probes
         working-directory: core
         run: |
@@ -32,3 +32,17 @@ jobs:
       - name: BitLocker and VeraCrypt (cryptsetup)
         if: always()
         run: core/testdata/crypt_compat.sh
+
+  windows:
+    name: BitLocker VHD on real Windows (informational)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build probe
+        working-directory: core
+        run: cargo build --release -p qscrypt-crypto --example bdeprobe
+      - name: Mount the VHD and unlock it with Windows
+        shell: pwsh
+        run: core/testdata/windows_bitlocker.ps1

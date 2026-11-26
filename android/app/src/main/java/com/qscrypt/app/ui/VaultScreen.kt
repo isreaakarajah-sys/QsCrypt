@@ -138,6 +138,7 @@ fun VaultScreen(handle: Long, path: String) {
     var info by remember { mutableStateOf(session.info) }
     var error by remember { mutableStateOf<String?>(null) }
     var refresh by remember { mutableIntStateOf(0) }
+    var tools by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var filter by remember { mutableIntStateOf(0) }
     var busy by remember { mutableStateOf<Busy?>(null) }
@@ -248,7 +249,13 @@ fun VaultScreen(handle: Long, path: String) {
                         Tag(info.fs)
                         if (info.readOnly) Tag("للقراءة فقط", TagKind.Outline)
                         if (info.hidden) Tag("مخفية", TagKind.Mint)
+                        if (info.protected) Tag("المخفي محمي", TagKind.Mint)
+                        if (info.extra.optBoolean("togo")) Tag("To Go", TagKind.Outline)
+                        if (session.usb != null) Tag("USB", TagKind.Outline)
                     }
+                }
+                if (info.format == "VeraCrypt" || info.format == "TrueCrypt") {
+                    IconBtn(R.drawable.ic_sliders, "أدوات الحاوية", tint = Qs.muted) { tools = true }
                 }
                 Row(
                     Modifier
@@ -314,7 +321,11 @@ fun VaultScreen(handle: Long, path: String) {
             if (info.readOnly) {
                 Box(Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) {
                     Note(
-                        if (info.fs == "exFAT") "الكتابة على exFAT قادمة في الإصدار التالي. يمكنك عرض الملفات وتصديرها." else "الخزنة مفتوحة للقراءة فقط. يمكنك عرض الملفات وتصديرها.",
+                        when {
+                            info.fs == "NTFS" -> "NTFS يُفتح للقراءة فقط في هذا الإصدار. يمكنك عرض الملفات وتصديرها."
+                            info.extra.optBoolean("eow") -> "قرص BitLocker مشفّر جزئياً (Encrypt used space only) يُفتح للقراءة فقط."
+                            else -> "الخزنة مفتوحة للقراءة فقط. يمكنك عرض الملفات وتصديرها."
+                        },
                         icon = R.drawable.ic_eye,
                     )
                 }
@@ -369,6 +380,7 @@ fun VaultScreen(handle: Long, path: String) {
             onDismiss = { cannotView = null },
         )
     }
+    if (tools) VaultTools(session) { tools = false }
 }
 
 /** Imports one document, picking "name (2).ext" etc. if the name is taken. */

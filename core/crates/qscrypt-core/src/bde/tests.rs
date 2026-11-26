@@ -54,7 +54,7 @@ fn engines_round_trip() {
 fn make(fs: FsChoice, method: Method) -> (SharedDisk, String) {
     let b = RefBackend::new();
     let s = shared(64 << 20);
-    let opts = BdeCreateOptions { password: "كلمة سر قوية 123", recovery_key: None, method, filesystem: fs, label: "QsBit", description: "QsCrypt test 2026-11-26", quick: true };
+    let opts = BdeCreateOptions { password: "كلمة سر قوية 123", recovery_key: None, method, filesystem: fs, label: "QsBit", description: "QsCrypt test 2026-11-26", quick: true, hidden_sectors: 0 };
     let rp = create_bitlocker(&b, view(&s), &opts, &mut |_, _| true, &AtomicBool::new(false)).unwrap();
     (s, rp)
 }
@@ -141,7 +141,7 @@ fn metadata_copies_and_tampering() {
 #[test]
 fn rejects_short_passwords_and_small_volumes() {
     let b = RefBackend::new();
-    let opts = BdeCreateOptions { password: "short", recovery_key: None, method: Method::Xts128, filesystem: FsChoice::Exfat, label: "", description: "", quick: true };
+    let opts = BdeCreateOptions { password: "short", recovery_key: None, method: Method::Xts128, filesystem: FsChoice::Exfat, label: "", description: "", quick: true, hidden_sectors: 2048 };
     assert!(create_bitlocker(&b, view(&shared(64 << 20)), &opts, &mut |_, _| true, &AtomicBool::new(false)).is_err());
     let opts = BdeCreateOptions { password: "long enough", ..opts };
     assert!(create_bitlocker(&b, view(&shared(8 << 20)), &opts, &mut |_, _| true, &AtomicBool::new(false)).is_err());

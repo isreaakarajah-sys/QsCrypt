@@ -39,6 +39,25 @@ data class Container(
     }
 }
 
+/** A contact: someone's public QsCrypt card. */
+data class Contact(val name: String, val card: String, val safety: String, val fingerprint: String, val signKey: String, val verified: Boolean, val added: Long) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("name", name).put("card", card).put("safety", safety).put("fingerprint", fingerprint)
+        .put("signKey", signKey).put("verified", verified).put("added", added)
+
+    companion object {
+        fun from(j: JSONObject) = Contact(
+            name = j.getString("name"),
+            card = j.getString("card"),
+            safety = j.optString("safety"),
+            fingerprint = j.optString("fingerprint"),
+            signKey = j.optString("signKey"),
+            verified = j.optBoolean("verified"),
+            added = j.optLong("added"),
+        )
+    }
+}
+
 /** App settings and the PIN, in app-private storage. Never holds passwords. */
 object Prefs {
     private lateinit var sp: SharedPreferences
@@ -107,6 +126,46 @@ object Prefs {
     var closeVaultsOnLock: Boolean
         get() = sp.getBoolean("close_on_lock", true)
         set(v) = sp.edit().putBoolean("close_on_lock", v).apply()
+
+    // ---------------------------------------------------------- time (clock rollback detection)
+
+    /** The latest wall-clock time (seconds) the app has seen. */
+    val maxSeenTime: Long get() = sp.getLong("max_seen", 0)
+
+    fun noteTime(now: Long) {
+        if (now > maxSeenTime) sp.edit().putLong("max_seen", now).apply()
+    }
+
+    // ---------------------------------------------------------- QsCrypt file policies
+
+    /** Wrong-password attempts per QsCrypt file id. */
+    fun attempts(fileId: String): Int = sp.getInt("att_$fileId", 0)
+
+    fun setAttempts(fileId: String, n: Int) = sp.edit().putInt("att_$fileId", n).apply()
+
+    /** Files opened once and burned on this phone. */
+    fun burned(fileId: String): Boolean = sp.getBoolean("burn_$fileId", false)
+
+    fun burn(fileId: String) = sp.edit().putBoolean("burn_$fileId", true).apply()
+
+    // ---------------------------------------------------------- disguise
+
+    var disguised: Boolean
+        get() = sp.getBoolean("disguised", false)
+        set(v) = sp.edit().putBoolean("disguised", v).apply()
+
+    // ---------------------------------------------------------- contacts (public cards only)
+
+    fun contacts(): List<Contact> {
+        val arr = runCatching { JSONArray(sp.getString("contacts", "[]")) }.getOrElse { JSONArray() }
+        return (0 until arr.length()).mapNotNull { runCatching { Contact.from(arr.getJSONObject(it)) }.getOrNull() }
+    }
+
+    fun saveContacts(list: List<Contact>) {
+        val arr = JSONArray()
+        list.forEach { arr.put(it.toJson()) }
+        sp.edit().putString("contacts", arr.toString()).apply()
+    }
 
     // ---------------------------------------------------------- containers
 

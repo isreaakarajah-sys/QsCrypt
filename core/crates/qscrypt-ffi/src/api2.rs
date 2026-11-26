@@ -21,6 +21,7 @@ use qscrypt_core::qvol;
 use qscrypt_core::usb::{DriveInfo, UsbDisk};
 use qscrypt_core::util::{now_unix, Secret};
 use qscrypt_core::vc::{self, keyfile, CipherChain, CreateOptions, Ea, EncVolume, Format, HiddenOptions, OpenOptions};
+use qscrypt_core::vhd;
 use qscrypt_core::{Error, Result};
 use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -78,9 +79,11 @@ pub fn call(method: &str, args: &str, blobs: &[Secret], fds: &[i32], progress: &
             Ok(ok())
         }
         "usb.partition" => usb_partition(&c),
+        "usb.info" => usb_info(&c),
         "qsc.inspect" => qsc_inspect(&c),
         "qsc.encrypt" => qsc_encrypt(&c, progress),
         "qsc.decrypt" => qsc_decrypt(&c, progress),
+        "qsc.check" => qsc_check(&c),
         "qsc.destroy" => qsc_destroy(&c),
         "qsc.recoveryKey" => qsc2::generate_recovery_key(backend()).map(|k| Obj::new().bool("ok", true).str("key", &k).end()),
         "id.public" => identity(&c).map(|id| public_json(&id.public)),
@@ -271,7 +274,8 @@ fn kind_of(boot: &[u8]) -> &'static str {
 }
 
 fn probe(c: &Call) -> Result<String> {
-    let (mut d, _) = source(c, true)?;
+    let (d, _) = source(c, true)?;
+    let mut d = vhd::unwrap(d, true)?;
     let mut boot = [0u8; 512];
     d.read_at(0, &mut boot)?;
     Ok(Obj::new().bool("ok", true).str("kind", kind_of(&boot)).uint("size", d.len()).end())
@@ -280,7 +284,8 @@ fn probe(c: &Call) -> Result<String> {
 fn volume_open(c: &Call) -> Result<String> {
     let want_ro = c.args.get("readOnly").bool_or(false);
     let tz = c.args.get("tz").i64_or(0) as i32;
-    let (mut disk, ro) = source(c, want_ro)?;
+    let (disk, ro) = source(c, want_ro)?;
+    let mut disk = vhd::unwrap(disk, ro)?;
     let mut boot = [0u8; 512];
     disk.read_at(0, &mut boot)?;
     let format = c.args.get("format").str_or("auto");
@@ -401,8 +406,13 @@ fn open_qvol(c: &Call, mut disk: Box<dyn Disk>, ro: bool, tz: i32) -> Result<Str
     let header = qvol::read_header(disk.as_mut())?;
     let verdict = header.evaluate(&context(c));
     if let Some(j) = verdict_json(&verdict, &header) {
-        if matches!(verdict, Verdict::Destroy(_)) && !ro {
-            qvol::destroy(backend(), disk.as_mut())?;
+        if matches!(verdict, Verdict::Destroy(_)) {
+            if !ro {
+                qvol::destroy(backend(), disk.as_mut())?;
+            } else if let Ok((mut d, false)) = source(c, false) {
+                // Opened read-only: the policy still applies.
+                qvol::destroy(backend(), d.as_mut())?;
+            }
         }
         return Ok(j);
     }
@@ -446,7 +456,14 @@ fn file_target(c: &Call, size: u64) -> Result<Box<dyn Disk>> {
 
 fn volume_create(c: &Call, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result<String> {
     let a = &c.args;
-    let mut disk = file_target(c, a.get("size").u64_or(0))?;
+    let on_usb = a.get("src").get("usb").as_i64().is_some();
+    // BitLocker in a file: a fixed VHD (whole MiB of disk, then the footer).
+    let vhd_image = a.get("format").str_or("") == "bitlocker" && a.get("vhd").bool_or(false) && !on_usb;
+    let mut size = a.get("size").u64_or(0);
+    if vhd_image {
+        size = vhd::image_size(size);
+    }
+    let mut disk = file_target(c, size)?;
     let fsc = fs_choice(a.get("fs").str_or("fat"));
     let label = a.get("label").str_or("").to_string();
     let quick = a.get("quick").bool_or(false);
@@ -496,9 +513,23 @@ fn volume_create(c: &Call, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result
                 _ => bde::Method::Xts128,
             };
             let description = a.get("description").str_or("QsCrypt").to_string();
-            let o = BdeCreateOptions { password: &pw, recovery_key: None, method, filesystem: fsc, label: &label, description: &description, quick };
-            let rp = bde::create_bitlocker(backend(), disk, &o, progress, &cancel)?;
-            Ok(Obj::new().bool("ok", true).str("format", "BitLocker").str("ea", method.name()).str("recovery", &rp).end())
+            let start = if on_usb { a.get("src").get("start").u64_or(0) } else { 0 };
+            let o = BdeCreateOptions {
+                password: &pw,
+                recovery_key: None,
+                method,
+                filesystem: fsc,
+                label: &label,
+                description: &description,
+                quick,
+                hidden_sectors: (start / 512).min(u32::MAX as u64) as u32,
+            };
+            let rp = if vhd_image {
+                vhd::create_bitlocker_vhd(backend(), disk, &o, progress, &cancel)?
+            } else {
+                bde::create_bitlocker(backend(), disk, &o, progress, &cancel)?
+            };
+            Ok(Obj::new().bool("ok", true).str("format", "BitLocker").str("ea", method.name()).str("recovery", &rp).bool("vhd", vhd_image).end())
         }
         "qscrypt" => {
             let (recipients, recovery) = qsc_recipients(c)?;
@@ -530,7 +561,16 @@ fn qsc_recipients(c: &Call) -> Result<(Vec<PublicIdentity>, Option<String>)> {
     for v in c.args.get("recipients").as_arr() {
         list.push(PublicIdentity::parse_card(v.str_or(""))?);
     }
-    let recovery = if c.args.get("recovery").bool_or(false) { Some(qsc2::generate_recovery_key(backend())?) } else { None };
+    // A recovery key given by the caller (one key for a batch of files), or a fresh one.
+    let recovery = match c.blob("recoveryKey").filter(|b| !b.is_empty()) {
+        Some(b) => {
+            let s = std::str::from_utf8(b).map_err(|_| Error::invalid("bad recovery key"))?;
+            qsc2::parse_recovery_key(s).ok_or_else(|| Error::invalid("bad recovery key"))?;
+            Some(s.to_string())
+        }
+        None if c.args.get("recovery").bool_or(false) => Some(qsc2::generate_recovery_key(backend())?),
+        None => None,
+    };
     Ok((list, recovery))
 }
 
@@ -642,6 +682,17 @@ fn drive_json(handle: i64, shared: &SharedDisk, info: &DriveInfo) -> Result<Stri
         .end())
 }
 
+/// The drive again (after creating a volume on it, its partitions changed kind).
+fn usb_info(c: &Call) -> Result<String> {
+    let h = c.args.get("handle").i64_or(0);
+    let (shared, info) = {
+        let reg = usb().lock().unwrap_or_else(|e| e.into_inner());
+        let d = reg.get(&h).ok_or_else(|| Error::invalid("the USB drive was disconnected"))?;
+        (d.disk.clone(), d.info.clone())
+    };
+    drive_json(h, &shared, &info)
+}
+
 fn usb_partition(c: &Call) -> Result<String> {
     let h = c.args.get("handle").i64_or(0);
     let (shared, info) = {
@@ -705,6 +756,32 @@ fn qsc_encrypt(c: &Call, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result<S
         out = out.str("recovery", r);
     }
     Ok(out.end())
+}
+
+/// Checks the policy and the password (or other unlock) without decrypting
+/// the content, so the app can ask where to save only once it is right.
+fn qsc_check(c: &Call) -> Result<String> {
+    let mut input = reader(c, "in")?;
+    let mut head = [0u8; 16];
+    let n = input.read(&mut head)?;
+    input.seek(SeekFrom::Start(0))?;
+    if !qsc2::is_v2(&head[..n]) {
+        return Ok(Obj::new().bool("ok", true).uint("version", 1).end());
+    }
+    let h = qsc2::read_header(&mut input)?;
+    let verdict = h.evaluate(&context(c));
+    if let Some(j) = verdict_json(&verdict, &h) {
+        return Ok(j);
+    }
+    let u = match unlock_and(c, |how| qsc2::unlock(backend(), &h, how)) {
+        Ok(u) => u,
+        Err(Error::WrongPassword) => return Ok(wrong_password_json(&h)),
+        Err(e) => return Err(e),
+    };
+    if u.duress {
+        return Ok(Obj::new().bool("ok", false).str("code", "duress").str("message", "wrong password").raw("policy", &policy_json(&h)).end());
+    }
+    Ok(Obj::new().bool("ok", true).uint("version", 2).raw("policy", &policy_json(&h)).end())
 }
 
 fn qsc_decrypt(c: &Call, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result<String> {
@@ -773,13 +850,21 @@ fn qsc_decrypt(c: &Call, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result<S
 
 /// Overwrites what makes a QsCrypt file or container decryptable.
 fn qsc_destroy(c: &Call) -> Result<String> {
-    let fd = c.fd("fd").ok_or_else(|| Error::invalid("missing file"))?;
-    let mut d = disk_from_fd(fd, false)?;
+    let mut d: Box<dyn Disk> = if c.args.get("src").get("usb").as_i64().is_some() {
+        let (d, ro) = source(c, false)?;
+        if ro {
+            return Err(Error::ReadOnly);
+        }
+        d
+    } else {
+        let fd = c.fd("fd").ok_or_else(|| Error::invalid("missing file"))?;
+        Box::new(disk_from_fd(fd, false)?)
+    };
     let mut head = [0u8; 16];
     let n = (d.len() as usize).min(16);
     d.read_at(0, &mut head[..n])?;
     if qvol::is_container(&head) {
-        qvol::destroy(backend(), &mut d)?;
+        qvol::destroy(backend(), d.as_mut())?;
     } else {
         let hl = if qsc2::is_v2(&head) { u32::from_le_bytes(head[12..16].try_into().unwrap()) as u64 } else { 4096 };
         let span = hl.max(4096).min(d.len());

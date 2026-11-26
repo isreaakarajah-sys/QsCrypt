@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.fragment.app.FragmentActivity
 import com.qscrypt.app.ui.AboutScreen
 import com.qscrypt.app.ui.ActivationScreen
+import com.qscrypt.app.ui.CalculatorScreen
 import com.qscrypt.app.ui.ContactsScreen
 import com.qscrypt.app.ui.DrivesScreen
 import com.qscrypt.app.ui.HomeScreen
@@ -40,6 +41,7 @@ import com.qscrypt.app.ui.Qs
 import com.qscrypt.app.ui.QsTheme
 import com.qscrypt.app.ui.SettingsScreen
 import com.qscrypt.app.ui.SplashScreen
+import com.qscrypt.app.ui.StegoScreen
 import com.qscrypt.app.ui.TwoFactorSetupScreen
 import com.qscrypt.app.ui.UnlockScreen
 import com.qscrypt.app.ui.VaultScreen
@@ -57,6 +59,8 @@ class MainActivity : FragmentActivity() {
         // No screenshots, no previews in the recent-apps list.
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         Prefs.init(applicationContext)
+        Net.init(applicationContext)
+        UsbDrives.init(applicationContext)
         if (Activation.isActive(applicationContext)) Fonts.load(applicationContext)
         AppState.load()
         if (!Prefs.hasPin()) AppState.locked = false
@@ -77,6 +81,11 @@ class MainActivity : FragmentActivity() {
 @Composable
 fun QsApp() {
     QsTheme {
+        // Disguise mode: a working calculator until the PIN and "=" are typed.
+        if (Prefs.disguised && Prefs.hasPin() && AppState.locked && !AppState.pinPassed) {
+            CalculatorScreen()
+            return@QsTheme
+        }
         // The interface is Arabic: right-to-left whatever the system language.
         CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
             Box(Modifier.fillMaxSize().background(Qs.base).systemBarsPadding().imePadding()) {
@@ -118,9 +127,10 @@ private fun Router() {
             Screen.About -> AboutScreen()
             Screen.NewEncryption -> NewEncryptionScreen()
             Screen.QscEncrypt -> QscEncryptScreen()
-            is Screen.NewContainer -> NewContainerScreen(screen.truecrypt)
+            is Screen.NewContainer -> NewContainerScreen(screen.format, screen.usb)
+            Screen.Stego -> StegoScreen()
             is Screen.QscDecrypt -> QscDecryptScreen(screen.uri, screen.name, screen.size)
-            is Screen.Unlock -> UnlockScreen(screen.container)
+            is Screen.Unlock -> UnlockScreen(screen.container, screen.usb)
             is Screen.Vault -> VaultScreen(screen.handle, screen.path)
             is Screen.Viewer -> ViewerScreen(screen.handle, screen.path, screen.name, screen.size)
         }
