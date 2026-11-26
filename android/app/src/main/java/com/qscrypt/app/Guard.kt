@@ -29,6 +29,7 @@ class QsApplication : Application() {
         Jobs.loadPending()
         UsbDrives.init(this)
         Guard.init(this)
+        Guard.cleanCache(this)
     }
 }
 
@@ -61,6 +62,19 @@ object Guard {
             }
         }
         components(app, Prefs.disguised)
+    }
+
+    /**
+     * Temporary files left by a run that was killed: copy buffers (encrypted
+     * with a key that died with the process) and encrypted intermediates.
+     */
+    fun cleanCache(context: Context) {
+        val dir = context.cacheDir ?: return
+        runCatching {
+            dir.listFiles()?.filter { f ->
+                f.isFile && (f.name.startsWith("copy-") || f.name.startsWith("wrap-") || f.name in setOf("unwrap.qsc", "stego.qsc", "revealed.qsc"))
+            }?.forEach { it.delete() }
+        }
     }
 
     /** The share target and the tile exist only when the app is not disguised. */
