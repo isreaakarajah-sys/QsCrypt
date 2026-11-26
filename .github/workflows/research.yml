@@ -3,48 +3,20 @@ on:
   push:
     branches: [research]
 jobs:
-  fetch:
+  verify:
+    name: Verify a locally signed APK with the Android SDK tools
     runs-on: ubuntu-latest
     steps:
-      - name: BitLocker test images
+      - uses: actions/checkout@v4
+      - name: apksigner and zipalign
         run: |
-          curl -fsSL https://gitlab.com/cryptsetup/cryptsetup/-/raw/main/tests/bitlk-images.tar.xz -o b.tar.xz || { echo FAILED; exit 0; }
-          ls -la b.tar.xz; tar xJf b.tar.xz; ls -laR bitlk-images | head -60
-          cat bitlk-images/images.conf
-      - name: Dump metadata of a few images
-        run: |
-          cd bitlk-images
-          python3 - <<'PY'
-          import struct, glob, os
-          for f in sorted(glob.glob('bitlk-*.img')):
-              d = open(f,'rb').read()
-              print("=====", f, len(d))
-              sig = d[3:11]
-              togo = sig == b'MSWIN4.1'
-              base = 424 if togo else 160
-              offs = struct.unpack_from('<3Q', d, base+16)
-              print("sig", sig, "boot", d[:3].hex(), "bps", struct.unpack_from('<H', d, 11)[0], "spc", d[13], "offs", offs)
-              mo = offs[0]
-              blk = d[mo:mo+64]
-              fve_size = struct.unpack_from('<H', blk, 8)[0]
-              print("block hdr", blk.hex())
-              real = fve_size << 4
-              print("fve_size", fve_size, "real", real)
-              md = d[mo+64:mo+112]
-              msize = struct.unpack_from('<I', md, 0)[0]
-              print("meta hdr", md.hex(), "msize", msize)
-              ents = d[mo+112:mo+64+msize]
-              p = 0
-              while p + 8 <= len(ents):
-                  sz, et, vt, ver = struct.unpack_from('<4H', ents, p)
-                  if sz == 0: break
-                  print("  entry size=%d type=0x%x value=0x%x ver=%d" % (sz, et, vt, ver))
-                  print("   ", ents[p:p+sz].hex())
-                  p += sz
-              val = d[mo+real:mo+real+96]
-              print("validation", val.hex())
-              # first bytes of header backup area location
-              print("after", d[mo+real+96:mo+real+160].hex())
-              if f.endswith('xts-128.img') or 'togo' in f:
-                  print("sector0", d[:512].hex())
-          PY
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "build-tools: $BT"
+          sha256sum QsCrypt.apk
+          "$BT/apksigner" verify --verbose --print-certs --min-sdk-version 24 QsCrypt.apk
+          echo "== as seen by Android 14+"
+          "$BT/apksigner" verify --verbose --min-sdk-version 34 QsCrypt.apk
+          echo "== alignment (4 bytes, 16 KB pages for native libraries)"
+          "$BT/zipalign" -c -P 16 -v 4 QsCrypt.apk | tail -3
+          echo "== badging"
+          "$BT/aapt2" dump badging QsCrypt.apk | grep -E "^package|sdkVersion|targetSdkVersion|launchable-activity|uses-permission|native-code" || true
