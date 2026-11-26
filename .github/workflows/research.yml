@@ -4,19 +4,22 @@ on:
     branches: [research]
 jobs:
   verify:
-    name: Verify a locally signed APK with the Android SDK tools
+    name: Verify locally signed APKs with the Android SDK tools
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: apksigner and zipalign
+      - name: apksigner, zipalign and aapt2
         run: |
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           echo "build-tools: $BT"
-          sha256sum QsCrypt.apk
-          "$BT/apksigner" verify --verbose --print-certs --min-sdk-version 24 QsCrypt.apk
-          echo "== as seen by Android 14+"
-          "$BT/apksigner" verify --verbose --min-sdk-version 34 QsCrypt.apk
-          echo "== alignment (4 bytes, 16 KB pages for native libraries)"
-          "$BT/zipalign" -c -P 16 -v 4 QsCrypt.apk | tail -3
-          echo "== badging"
-          "$BT/aapt2" dump badging QsCrypt.apk | grep -E "^package|sdkVersion|targetSdkVersion|launchable-activity|uses-permission|native-code" || true
+          for apk in *.apk; do
+            echo "=================== $apk"
+            sha256sum "$apk"
+            "$BT/apksigner" verify --verbose --print-certs --min-sdk-version 24 "$apk"
+            echo "== as seen by Android 14+"
+            "$BT/apksigner" verify --verbose --min-sdk-version 34 "$apk" | head -5
+            echo "== alignment (4 bytes, 16 KB pages for native libraries)"
+            "$BT/zipalign" -c -P 16 -v 4 "$apk" | tail -2
+            echo "== badging"
+            "$BT/aapt2" dump badging "$apk" | grep -E "^package|sdkVersion|targetSdkVersion|launchable-activity|native-code" || true
+          done
