@@ -57,7 +57,8 @@ const val SPLASH_MS = 7_000
 
 // Set in the app's own Hacen fonts, which carry every letter and haraka of the
 // verse; only the ornate brackets come from the system's Naskh face.
-private const val VERSE = "فَاللَّهُ خَيْرٌ حَافِظًا وَهُوَ أَرْحَمُ الرَّاحِمِينَ"
+// Two balanced lines, broken at the verse's natural pause.
+private const val VERSE = "فَاللَّهُ خَيْرٌ حَافِظًا\nوَهُوَ أَرْحَمُ الرَّاحِمِينَ"
 private const val OPEN = "\uFD3F"
 private const val CLOSE = "\uFD3E"
 private const val DUA_1 = "اللَّهُمَّ انْصُرِ الْإِسْلَامَ وَالْمُسْلِمِينَ"
@@ -104,7 +105,7 @@ fun SplashScreen(onDone: () -> Unit) {
         Modifier
             .fillMaxSize()
             .background(Brush.verticalGradient(listOf(Color(0xFF0C3326), Qs.base, Color(0xFF071F18))))
-            .semantics { contentDescription = "QsCrypt. $VERSE. $DUA_1. $DUA_2. $RELEASE_NAME $RELEASE_YEAR" },
+            .semantics { contentDescription = "QsCrypt. ${VERSE.replace('\n', ' ')}. $DUA_1. $DUA_2. $RELEASE_NAME $RELEASE_YEAR" },
     ) {
         // A faint brass halo behind the emblem.
         Canvas(Modifier.fillMaxSize()) {
@@ -142,7 +143,7 @@ fun SplashScreen(onDone: () -> Unit) {
             Gap(22.dp)
             Text(
                 verseText,
-                style = TextStyle(fontFamily = HacenXL, fontSize = 31.sp, lineHeight = 58.sp, color = Qs.ivory),
+                style = TextStyle(fontFamily = HacenXL, fontSize = 34.sp, lineHeight = 62.sp, color = Qs.ivory),
                 textAlign = TextAlign.Center,
                 modifier = Modifier.alpha(verse.value),
             )
