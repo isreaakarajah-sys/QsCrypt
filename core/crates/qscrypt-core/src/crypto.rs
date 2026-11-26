@@ -109,6 +109,41 @@ pub trait Backend: Send + Sync {
         Err(crate::error::Error::unsupported("AES-128"))
     }
 
+    /// X25519 (RFC 7748): `scalar` times `point`; the base point gives the public key.
+    fn x25519(&self, _scalar: &[u8; 32], _point: &[u8; 32]) -> Result<[u8; 32]> {
+        Err(crate::error::Error::unsupported("X25519"))
+    }
+
+    /// ML-KEM-768 (FIPS 203): (decapsulation key 2400 B, encapsulation key 1184 B).
+    fn mlkem768_keygen(&self) -> Result<(Vec<u8>, Vec<u8>)> {
+        Err(crate::error::Error::unsupported("ML-KEM-768"))
+    }
+
+    /// (ciphertext 1088 B, shared secret).
+    fn mlkem768_encapsulate(&self, _ek: &[u8]) -> Result<(Vec<u8>, [u8; 32])> {
+        Err(crate::error::Error::unsupported("ML-KEM-768"))
+    }
+
+    fn mlkem768_decapsulate(&self, _dk: &[u8], _ct: &[u8]) -> Result<[u8; 32]> {
+        Err(crate::error::Error::unsupported("ML-KEM-768"))
+    }
+
+    /// Ed25519 (RFC 8032) public key of a 32-byte secret seed.
+    fn ed25519_public(&self, _seed: &[u8; 32]) -> Result<[u8; 32]> {
+        Err(crate::error::Error::unsupported("Ed25519"))
+    }
+
+    fn ed25519_sign(&self, _seed: &[u8; 32], _msg: &[u8]) -> Result<[u8; 64]> {
+        Err(crate::error::Error::unsupported("Ed25519"))
+    }
+
+    fn ed25519_verify(&self, _public: &[u8; 32], _msg: &[u8], _sig: &[u8; 64]) -> bool {
+        false
+    }
+
+    /// SHA-512 over the concatenation of `parts`.
+    fn sha512(&self, parts: &[&[u8]]) -> [u8; 64];
+
     /// Cryptographically secure random bytes from the operating system.
     fn fill_random(&self, out: &mut [u8]) -> Result<()>;
 

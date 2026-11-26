@@ -318,6 +318,9 @@ mod serpent_order {
         fn sha256(&self, p: &[&[u8]]) -> [u8; 32] {
             RustCrypto.sha256(p)
         }
+        fn sha512(&self, p: &[&[u8]]) -> [u8; 64] {
+            RustCrypto.sha512(p)
+        }
         fn cipher(&self, kind: CipherKind, key: &[u8; 32]) -> qscrypt_core::Result<Box<dyn BlockCipher>> {
             if kind != CipherKind::Serpent {
                 return RustCrypto.cipher(kind, key);
@@ -367,4 +370,65 @@ fn opens_asset_sealed_by_python() {
     let last = bad.len() - 1;
     bad[last] ^= 1;
     assert!(qsc::open_asset(&b, v::ASSET_PW, &bad).is_err());
+}
+
+// ---------------------------------------------------------------- asymmetric (QsCrypt v2)
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+}
+
+#[test]
+fn x25519_rfc7748() {
+    let b = RustCrypto;
+    let mut base = [0u8; 32];
+    base[0] = 9;
+    let a: [u8; 32] = unhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a").try_into().unwrap();
+    let bb: [u8; 32] = unhex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb").try_into().unwrap();
+    let pa = b.x25519(&a, &base).unwrap();
+    let pb = b.x25519(&bb, &base).unwrap();
+    assert_eq!(pa.to_vec(), unhex("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"));
+    assert_eq!(pb.to_vec(), unhex("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"));
+    let k = unhex("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
+    assert_eq!(b.x25519(&a, &pb).unwrap().to_vec(), k);
+    assert_eq!(b.x25519(&bb, &pa).unwrap().to_vec(), k);
+    assert!(b.x25519(&a, &[0u8; 32]).is_err(), "low-order point rejected");
+}
+
+#[test]
+fn ed25519_rfc8032_test1() {
+    let b = RustCrypto;
+    let seed: [u8; 32] = unhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60").try_into().unwrap();
+    let pk = b.ed25519_public(&seed).unwrap();
+    assert_eq!(pk.to_vec(), unhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"));
+    let sig = b.ed25519_sign(&seed, b"").unwrap();
+    assert_eq!(sig.to_vec(), unhex("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"));
+    assert!(b.ed25519_verify(&pk, b"", &sig));
+    assert!(!b.ed25519_verify(&pk, b"x", &sig));
+}
+
+#[test]
+fn mlkem768_round_trip() {
+    let b = RustCrypto;
+    let (dk, ek) = b.mlkem768_keygen().unwrap();
+    assert_eq!((dk.len(), ek.len()), (2400, 1184));
+    let (ct, ss) = b.mlkem768_encapsulate(&ek).unwrap();
+    assert_eq!(ct.len(), 1088);
+    assert_eq!(b.mlkem768_decapsulate(&dk, &ct).unwrap(), ss);
+    // A different key gives a different (implicitly rejected) secret.
+    let (dk2, _) = b.mlkem768_keygen().unwrap();
+    assert_ne!(b.mlkem768_decapsulate(&dk2, &ct).unwrap(), ss);
+    let mut bad = ct.clone();
+    bad[5] ^= 1;
+    assert_ne!(b.mlkem768_decapsulate(&dk, &bad).unwrap(), ss);
+}
+
+#[test]
+fn sha512_and_aes128() {
+    let b = RustCrypto;
+    assert_eq!(b.sha512(&[b"abc"]).to_vec(), unhex("ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"));
+    let c = b.aes128(&unhex("000102030405060708090a0b0c0d0e0f").try_into().unwrap()).unwrap();
+    let mut blk = unhex("00112233445566778899aabbccddeeff");
+    c.encrypt_blocks(&mut blk);
+    assert_eq!(blk, unhex("69c4e0d86a7b0430d8cdb78070b4c55a"));
 }

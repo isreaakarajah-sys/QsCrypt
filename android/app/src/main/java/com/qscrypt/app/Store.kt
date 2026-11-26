@@ -99,6 +99,11 @@ object Prefs {
         get() = sp.getLong("autolock_ms", 30_000)
         set(v) = sp.edit().putLong("autolock_ms", v).apply()
 
+    /** PhoneAuth.Mode id; -1 until the user has chosen. */
+    var lockMode: Int
+        get() = sp.getInt("lock_mode", -1)
+        set(v) = sp.edit().putInt("lock_mode", v).apply()
+
     var closeVaultsOnLock: Boolean
         get() = sp.getBoolean("close_on_lock", true)
         set(v) = sp.edit().putBoolean("close_on_lock", v).apply()

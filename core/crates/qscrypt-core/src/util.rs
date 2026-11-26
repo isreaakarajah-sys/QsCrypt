@@ -56,6 +56,97 @@ pub fn guid_string(b: &[u8]) -> String {
     )
 }
 
+// ---------------------------------------------------------------- base45 (RFC 9285)
+
+const B45: &[u8; 45] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+
+/// Base45: the QR alphanumeric alphabet, so QR codes stay small.
+pub fn base45_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len() * 3 / 2 + 2);
+    for pair in data.chunks(2) {
+        let (mut n, digits) = if pair.len() == 2 { ((pair[0] as u32) << 8 | pair[1] as u32, 3) } else { (pair[0] as u32, 2) };
+        for _ in 0..digits {
+            out.push(B45[(n % 45) as usize] as char);
+            n /= 45;
+        }
+    }
+    out
+}
+
+pub fn base45_decode(s: &str) -> Option<Vec<u8>> {
+    let vals: Vec<u32> = s.bytes().map(|c| B45.iter().position(|&b| b == c).map(|p| p as u32)).collect::<Option<_>>()?;
+    let mut out = Vec::with_capacity(vals.len() * 2 / 3 + 1);
+    for chunk in vals.chunks(3) {
+        match chunk {
+            [c, d, e] => {
+                let n = c + d * 45 + e * 45 * 45;
+                if n > 0xFFFF {
+                    return None;
+                }
+                out.push((n >> 8) as u8);
+                out.push(n as u8);
+            }
+            [c, d] => {
+                let n = c + d * 45;
+                if n > 0xFF {
+                    return None;
+                }
+                out.push(n as u8);
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+// ---------------------------------------------------------------- Crockford base32
+
+const B32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// Crockford base32 (no I, L, O, U), for keys people type.
+pub fn base32_encode(data: &[u8]) -> String {
+    let mut out = String::new();
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for &b in data {
+        acc = (acc << 8) | b as u32;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(B32[((acc >> bits) & 31) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        out.push(B32[((acc << (5 - bits)) & 31) as usize] as char);
+    }
+    out
+}
+
+/// Decodes, forgiving case, dashes, spaces and the look-alikes O/I/L.
+pub fn base32_decode(s: &str, bytes: usize) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in s.chars() {
+        let c = match c.to_ascii_uppercase() {
+            '-' | ' ' => continue,
+            'O' => '0',
+            'I' | 'L' => '1',
+            c => c,
+        };
+        let v = B32.iter().position(|&b| b as char == c)? as u32;
+        acc = (acc << 5) | v;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    if out.len() == bytes {
+        Some(out)
+    } else {
+        None
+    }
+}
+
 // ---------------------------------------------------------------- wiping
 
 /// Overwrites `buf` with zeros in a way the optimizer will not remove.
@@ -232,6 +323,27 @@ pub fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base45_rfc9285_examples() {
+        assert_eq!(base45_encode(b"AB"), "BB8");
+        assert_eq!(base45_encode(b"Hello!!"), "%69 VD92EX0");
+        assert_eq!(base45_encode(b"base-45"), "UJCLQE7W581");
+        assert_eq!(base45_decode("QED8WEX0").unwrap(), b"ietf!");
+        let all: Vec<u8> = (0..=255).collect();
+        assert_eq!(base45_decode(&base45_encode(&all)).unwrap(), all);
+        assert!(base45_decode("GGW").is_none(), "65535 < n is rejected");
+    }
+
+    #[test]
+    fn base32_round_trip() {
+        let k: Vec<u8> = (0..20u8).map(|i| i * 13).collect();
+        let s = base32_encode(&k);
+        assert_eq!(s.len(), 32);
+        assert_eq!(base32_decode(&s, 20).unwrap(), k);
+        assert_eq!(base32_decode(&s.to_lowercase().replace('0', "o"), 20).unwrap(), k);
+        assert!(base32_decode("UUUU", 2).is_none());
+    }
 
     #[test]
     fn crc32_known_values() {

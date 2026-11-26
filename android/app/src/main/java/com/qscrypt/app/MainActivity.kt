@@ -3,7 +3,6 @@ package com.qscrypt.app
 import android.graphics.Color
 import android.os.Bundle
 import android.view.WindowManager
-import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -25,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.fragment.app.FragmentActivity
 import com.qscrypt.app.ui.AboutScreen
 import com.qscrypt.app.ui.ActivationScreen
 import com.qscrypt.app.ui.ContactsScreen
@@ -39,13 +39,15 @@ import com.qscrypt.app.ui.QscEncryptScreen
 import com.qscrypt.app.ui.Qs
 import com.qscrypt.app.ui.QsTheme
 import com.qscrypt.app.ui.SettingsScreen
+import com.qscrypt.app.ui.SplashScreen
+import com.qscrypt.app.ui.TwoFactorSetupScreen
 import com.qscrypt.app.ui.UnlockScreen
 import com.qscrypt.app.ui.VaultScreen
 import com.qscrypt.app.ui.ViewerScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
@@ -81,17 +83,20 @@ fun QsApp() {
                 val context = LocalContext.current
                 var active by remember { mutableStateOf(Activation.isActive(context)) }
                 var hasPin by remember { mutableStateOf(Prefs.hasPin()) }
+                var lockChosen by remember { mutableStateOf(Prefs.lockMode >= 0 || !PhoneAuth.available(context)) }
                 LaunchedEffect(Unit) {
                     if (AppState.selfTest == null) {
                         AppState.selfTest = withContext(Dispatchers.Default) { runCatching { SelfTest.run() }.getOrNull() }
                     }
                 }
                 when {
+                    !AppState.splashDone -> SplashScreen(onDone = { AppState.splashDone = true })
                     !active -> ActivationScreen(onDone = { active = true })
                     !hasPin -> PinSetupScreen(onDone = {
                         hasPin = true
                         AppState.locked = false
                     })
+                    !lockChosen -> TwoFactorSetupScreen(onDone = { lockChosen = true })
                     AppState.locked -> LockScreen()
                     else -> Router()
                 }

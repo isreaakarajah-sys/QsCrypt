@@ -65,12 +65,12 @@ fn entry(ety: u16, vty: u16, value: &[u8]) -> Vec<u8> {
     e
 }
 
-/// A key datum (as found inside sealed data): header, method, key bytes.
+/// A key datum as Windows seals it: size, role 0, value type 1 (key),
+/// version 0, method, key bytes.
 fn key_datum(method: u16, key: &[u8]) -> Secret {
     let mut d = Secret::new(12 + key.len());
     put_le16(&mut d, 0, (12 + key.len()) as u16);
     put_le16(&mut d, 4, 1);
-    put_le16(&mut d, 6, 1);
     put_le16(&mut d, 8, method);
     d[12..].copy_from_slice(key);
     d
@@ -136,7 +136,8 @@ fn build_metadata(
         let mut stretch_value = Vec::new();
         stretch_value.extend_from_slice(&0x1001u32.to_le_bytes());
         stretch_value.extend_from_slice(&salt);
-        let inner = sealed(backend, vmk, nonces.next(), &key_datum(0x2003, &key))?;
+        // Windows keeps the stretched key sealed with the VMK (method 0x2007).
+        let inner = sealed(backend, vmk, nonces.next(), &key_datum(0x2007, &key))?;
         stretch_value.extend(entry(0x0000, 0x0005, &inner));
         let mut props = entry(0x0000, 0x0003, &stretch_value);
         props.extend(entry(0x0000, 0x0005, &sealed(backend, &key, nonces.next(), &key_datum(0x2003, vmk))?));
@@ -157,7 +158,7 @@ fn build_metadata(
         stretch_value.extend_from_slice(&0x1000u32.to_le_bytes());
         stretch_value.extend_from_slice(&salt);
         stretch_value.extend(entry(0x0012, 0x0005, &sealed(backend, vmk, nonces.next(), &key_datum(0x1000, recovery))?));
-        stretch_value.extend(entry(0x0013, 0x0005, &sealed(backend, vmk, nonces.next(), &key_datum(0x2003, &key))?));
+        stretch_value.extend(entry(0x0013, 0x0005, &sealed(backend, vmk, nonces.next(), &key_datum(0x2008, &key))?));
         let mut props = entry(0x0000, 0x0003, &stretch_value);
         props.extend(entry(0x0000, 0x0005, &sealed(backend, &key, nonces.next(), &key_datum(0x2003, vmk))?));
         let mut v = new_guid(backend)?.to_vec();
@@ -220,7 +221,6 @@ fn build_metadata(
         let mut hv = vec![0u8; 44];
         put_le16(&mut hv, 0, 44);
         put_le16(&mut hv, 4, 1);
-        put_le16(&mut hv, 6, 1);
         put_le16(&mut hv, 8, 0x2005);
         hv[12..44].copy_from_slice(&hash);
         let nested = sealed(backend, vmk, validation_nonce, &hv)?;

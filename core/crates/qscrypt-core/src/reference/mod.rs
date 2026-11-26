@@ -20,6 +20,12 @@ pub struct RefBackend {
     fakes: bool,
 }
 
+const X25519_BASE: [u8; 32] = {
+    let mut b = [0u8; 32];
+    b[0] = 9;
+    b
+};
+
 impl RefBackend {
     pub fn new() -> RefBackend {
         RefBackend { fakes: false }
@@ -116,6 +122,71 @@ impl Backend for RefBackend {
 
     fn aes128(&self, key: &[u8; 16]) -> Result<Box<dyn BlockCipher>> {
         Ok(Box::new(aes::Aes256::new128(key)))
+    }
+
+    fn sha512(&self, parts: &[&[u8]]) -> [u8; 64] {
+        Sha512::digest(parts).try_into().unwrap()
+    }
+
+    // The fakes below have the algebraic shape the formats rely on (shared
+    // secrets agree, signatures verify) and nothing else. Never secure.
+
+    fn x25519(&self, scalar: &[u8; 32], point: &[u8; 32]) -> Result<[u8; 32]> {
+        if !self.fakes {
+            return Err(Error::unsupported("X25519"));
+        }
+        // "public key" = the scalar itself; DH = hash of the unordered pair.
+        if *point == X25519_BASE {
+            return Ok(*scalar);
+        }
+        let (a, b) = if scalar <= point { (scalar, point) } else { (point, scalar) };
+        Ok(Sha256::digest(&[b"fake x25519", a, b]).try_into().unwrap())
+    }
+
+    fn mlkem768_keygen(&self) -> Result<(Vec<u8>, Vec<u8>)> {
+        if !self.fakes {
+            return Err(Error::unsupported("ML-KEM-768"));
+        }
+        let mut seed = vec![0u8; 1184];
+        self.fill_random(&mut seed)?;
+        let mut dk = vec![0u8; 2400];
+        dk[..1184].copy_from_slice(&seed);
+        Ok((dk, seed))
+    }
+
+    fn mlkem768_encapsulate(&self, ek: &[u8]) -> Result<(Vec<u8>, [u8; 32])> {
+        if !self.fakes || ek.len() != 1184 {
+            return Err(Error::unsupported("ML-KEM-768"));
+        }
+        let mut ct = vec![0u8; 1088];
+        self.fill_random(&mut ct)?;
+        let ss = Sha256::digest(&[b"fake mlkem", ek, &ct]).try_into().unwrap();
+        Ok((ct, ss))
+    }
+
+    fn mlkem768_decapsulate(&self, dk: &[u8], ct: &[u8]) -> Result<[u8; 32]> {
+        if !self.fakes || dk.len() != 2400 || ct.len() != 1088 {
+            return Err(Error::unsupported("ML-KEM-768"));
+        }
+        Ok(Sha256::digest(&[b"fake mlkem", &dk[..1184], ct]).try_into().unwrap())
+    }
+
+    fn ed25519_public(&self, seed: &[u8; 32]) -> Result<[u8; 32]> {
+        if !self.fakes {
+            return Err(Error::unsupported("Ed25519"));
+        }
+        Ok(*seed)
+    }
+
+    fn ed25519_sign(&self, seed: &[u8; 32], msg: &[u8]) -> Result<[u8; 64]> {
+        if !self.fakes {
+            return Err(Error::unsupported("Ed25519"));
+        }
+        Ok(self.hmac_sha512(seed, &[msg]))
+    }
+
+    fn ed25519_verify(&self, public: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> bool {
+        self.fakes && crate::util::ct_eq(&self.hmac_sha512(public, &[msg]), sig)
     }
 
     fn fill_random(&self, out: &mut [u8]) -> Result<()> {

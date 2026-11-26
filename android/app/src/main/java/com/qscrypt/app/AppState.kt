@@ -31,6 +31,8 @@ object AppState {
     var containers by mutableStateOf<List<Container>>(emptyList())
     var locked by mutableStateOf(true)
     var selfTest by mutableStateOf<SelfTest?>(null)
+    /** The opening screen is shown once per launch of the app process. */
+    var splashDone by mutableStateOf(false)
 
     private var backgroundAt = 0L
 

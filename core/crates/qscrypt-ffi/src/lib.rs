@@ -11,14 +11,133 @@
 //! - Panics are caught and reported as errors instead of crashing the app.
 
 mod api;
+mod api2;
+#[cfg(any(target_os = "android", target_os = "linux"))]
+mod usbfs;
 
-use jni::objects::{JByteArray, JObject, JString, JValue};
+use jni::objects::{JByteArray, JIntArray, JObject, JObjectArray, JString, JValue};
 use jni::sys::{jboolean, jbyteArray, jint, jlong, jstring};
 use jni::JNIEnv;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::{Duration, Instant};
 
 pub use api::*;
+pub use api2::{call, call_bytes};
+
+fn get_blobs(env: &mut JNIEnv, arr: &JObjectArray) -> Vec<qscrypt_core::util::Secret> {
+    if arr.is_null() {
+        return Vec::new();
+    }
+    let n = env.get_array_length(arr).unwrap_or(0);
+    (0..n)
+        .map(|i| match env.get_object_array_element(arr, i) {
+            Ok(o) if !o.is_null() => {
+                let b = JByteArray::from(o);
+                get_bytes(env, &b)
+            }
+            _ => qscrypt_core::util::Secret::default(),
+        })
+        .collect()
+}
+
+fn get_ints(env: &mut JNIEnv, arr: &JIntArray) -> Vec<i32> {
+    if arr.is_null() {
+        return Vec::new();
+    }
+    let n = env.get_array_length(arr).unwrap_or(0).max(0) as usize;
+    let mut v = vec![0i32; n];
+    if env.get_int_array_region(arr, 0, &mut v).is_err() {
+        v.clear();
+    }
+    v
+}
+
+fn to_jbytes(env: &mut JNIEnv, b: Option<Vec<u8>>) -> jbyteArray {
+    match b {
+        Some(mut v) => {
+            let r = env.byte_array_from_slice(&v).map(|a| a.into_raw()).unwrap_or(std::ptr::null_mut());
+            qscrypt_core::util::wipe(&mut v);
+            r
+        }
+        None => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_qscrypt_app_QsCore_call<'local>(
+    mut env: JNIEnv<'local>,
+    _this: JObject<'local>,
+    method: JString<'local>,
+    args: JString<'local>,
+    blobs: JObjectArray<'local>,
+    fds: JIntArray<'local>,
+    progress: JObject<'local>,
+) -> jstring {
+    let method = get_string(&mut env, &method);
+    let args = get_string(&mut env, &args);
+    let blobs = get_blobs(&mut env, &blobs);
+    let fds = get_ints(&mut env, &fds);
+    let json = {
+        let mut p = JProgress::new(&mut env, &progress);
+        guarded(|| api2::call(&method, &args, &blobs, &fds, &mut |d, t| p.report(d, t)))
+    };
+    to_jstring(&mut env, &json)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_qscrypt_app_QsCore_callBytes<'local>(
+    mut env: JNIEnv<'local>,
+    _this: JObject<'local>,
+    method: JString<'local>,
+    args: JString<'local>,
+    blobs: JObjectArray<'local>,
+    fds: JIntArray<'local>,
+) -> jbyteArray {
+    let method = get_string(&mut env, &method);
+    let args = get_string(&mut env, &args);
+    let blobs = get_blobs(&mut env, &blobs);
+    let fds = get_ints(&mut env, &fds);
+    let out = catch_unwind(AssertUnwindSafe(|| api2::call_bytes(&method, &args, &blobs, &fds))).unwrap_or(None);
+    to_jbytes(&mut env, out)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_qscrypt_app_QsCore_stegoHide<'local>(
+    mut env: JNIEnv<'local>,
+    _this: JObject<'local>,
+    pixels: JIntArray<'local>,
+    password: JByteArray<'local>,
+    payload: JByteArray<'local>,
+) -> jstring {
+    let pw = get_bytes(&mut env, &password);
+    let data = get_bytes(&mut env, &payload);
+    let px = get_ints(&mut env, &pixels);
+    let mut px: Vec<u32> = px.into_iter().map(|v| v as u32).collect();
+    let json = guarded(|| match api2::stego_hide(&mut px, &pw, &data) {
+        Ok(()) => api::ok(),
+        Err(e) => api::err(&e),
+    });
+    if json.contains("\"ok\":true") {
+        let back: Vec<i32> = px.iter().map(|&v| v as i32).collect();
+        if env.set_int_array_region(&pixels, 0, &back).is_err() {
+            return to_jstring(&mut env, &api::err_json("internal", "could not write pixels"));
+        }
+    }
+    to_jstring(&mut env, &json)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_qscrypt_app_QsCore_stegoReveal<'local>(
+    mut env: JNIEnv<'local>,
+    _this: JObject<'local>,
+    pixels: JIntArray<'local>,
+    password: JByteArray<'local>,
+) -> jbyteArray {
+    let pw = get_bytes(&mut env, &password);
+    let px: Vec<u32> = get_ints(&mut env, &pixels).into_iter().map(|v| v as u32).collect();
+    let out = catch_unwind(AssertUnwindSafe(|| api2::stego_reveal(&px, &pw).ok())).unwrap_or(None);
+    to_jbytes(&mut env, out)
+}
 
 fn to_jstring(env: &mut JNIEnv, s: &str) -> jstring {
     env.new_string(s).map(|j| j.into_raw()).unwrap_or(std::ptr::null_mut())

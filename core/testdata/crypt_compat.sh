@@ -42,7 +42,8 @@ for combo in "exfat xts128" "fat cbc128" "exfat xts256" "fat cbc256"; do
   for cred in "QsCrypt-Password-1" "$rp"; do
     printf '%s' "$cred" | sudo cryptsetup open --type bitlk --key-file=- "$img" qsbl 2> "$WORK/err" || { echo "FAIL cryptsetup open $combo: $(cat "$WORK/err")"; fail=1; continue; }
     case $1 in exfat) sudo fsck.exfat -n /dev/mapper/qsbl > "$WORK/fsck" 2>&1 ;; fat) sudo fsck.fat -n /dev/mapper/qsbl > "$WORK/fsck" 2>&1 ;; esac || { echo "FAIL fsck $combo"; cat "$WORK/fsck"; fail=1; }
-    sudo mount -o ro /dev/mapper/qsbl "$WORK/mnt" && {
+    opts=ro; [ "$1" = fat ] && opts=ro,utf8
+    sudo mount -o "$opts" /dev/mapper/qsbl "$WORK/mnt" && {
       hello=$(cat "$WORK/mnt/hello.txt"); n=$(stat -c %s "$WORK/mnt/مجلد/big.bin")
       [ "$hello" = "QsCrypt BitLocker" ] && [ "$n" = 5000000 ] && echo "PASS cryptsetup + mount $combo" || { echo "FAIL content $combo: $hello $n"; fail=1; }
       sudo umount "$WORK/mnt"; } || { echo "FAIL mount $combo"; fail=1; }
@@ -61,7 +62,8 @@ check_vc() { # label image password keyfile(or -) [hidden]
   [ -n "$hidden" ] && args+=(--tcrypt-hidden)
   printf '%s\n' "$pw" | sudo cryptsetup open "${args[@]}" "$img" qsvc 2> "$WORK/err" || { echo "FAIL cryptsetup $label: $(cat "$WORK/err")"; fail=1; return; }
   sudo fsck -n /dev/mapper/qsvc > "$WORK/fsck" 2>&1 || { echo "FAIL fsck $label"; cat "$WORK/fsck"; fail=1; }
-  sudo mount -o ro /dev/mapper/qsvc "$WORK/mnt" && { ls -la "$WORK/mnt"; cat "$WORK/mnt"/*.txt; echo; echo "PASS $label"; sudo umount "$WORK/mnt"; } || { echo "FAIL mount $label"; fail=1; }
+  sudo mount -o ro,utf8 /dev/mapper/qsvc "$WORK/mnt" 2>/dev/null || sudo mount -o ro /dev/mapper/qsvc "$WORK/mnt"
+  mountpoint -q "$WORK/mnt" && { ls -la "$WORK/mnt"; cat "$WORK/mnt"/*.txt; echo; echo "PASS $label"; sudo umount "$WORK/mnt"; } || { echo "FAIL mount $label"; fail=1; }
   sudo cryptsetup close qsvc
 }
 "$VOL" create "$WORK/vc1.hc" 67108864 exfat "vc pass 1" AES - && check_vc "VeraCrypt AES exFAT" "$WORK/vc1.hc" "vc pass 1" -

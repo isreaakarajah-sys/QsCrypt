@@ -122,6 +122,73 @@ impl Backend for RustCrypto {
         r
     }
 
+    fn sha512(&self, parts: &[&[u8]]) -> [u8; 64] {
+        let mut h = Sha512::new();
+        for p in parts {
+            Digest::update(&mut h, p);
+        }
+        let mut r = [0u8; 64];
+        r.copy_from_slice(&h.finalize());
+        r
+    }
+
+    fn x25519(&self, scalar: &[u8; 32], point: &[u8; 32]) -> Result<[u8; 32]> {
+        let out = x25519_dalek::x25519(*scalar, *point);
+        // An all-zero output means a low-order point (RFC 7748 section 6.1).
+        if out == [0u8; 32] {
+            return Err(Error::Crypto("X25519: low-order point".into()));
+        }
+        Ok(out)
+    }
+
+    fn mlkem768_keygen(&self) -> Result<(Vec<u8>, Vec<u8>)> {
+        use ml_kem::{EncodedSizeUser, KemCore, MlKem768};
+        let (dk, ek) = MlKem768::generate(&mut rand_core::OsRng);
+        Ok((dk.as_bytes().to_vec(), ek.as_bytes().to_vec()))
+    }
+
+    fn mlkem768_encapsulate(&self, ek: &[u8]) -> Result<(Vec<u8>, [u8; 32])> {
+        use ml_kem::kem::Encapsulate;
+        use ml_kem::{EncodedSizeUser, KemCore, MlKem768};
+        type Ek = <MlKem768 as KemCore>::EncapsulationKey;
+        let enc = ml_kem::Encoded::<Ek>::try_from(ek).map_err(|_| Error::Crypto("ML-KEM-768 key length".into()))?;
+        let key = Ek::from_bytes(&enc);
+        let (ct, ss) = key.encapsulate(&mut rand_core::OsRng).map_err(|_| Error::Crypto("ML-KEM-768 encapsulation".into()))?;
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&ss);
+        Ok((ct.to_vec(), out))
+    }
+
+    fn mlkem768_decapsulate(&self, dk: &[u8], ct: &[u8]) -> Result<[u8; 32]> {
+        use ml_kem::kem::Decapsulate;
+        use ml_kem::{EncodedSizeUser, KemCore, MlKem768};
+        type Dk = <MlKem768 as KemCore>::DecapsulationKey;
+        let enc = ml_kem::Encoded::<Dk>::try_from(dk).map_err(|_| Error::Crypto("ML-KEM-768 key length".into()))?;
+        let key = Dk::from_bytes(&enc);
+        let c = ml_kem::Ciphertext::<MlKem768>::try_from(ct).map_err(|_| Error::Crypto("ML-KEM-768 ciphertext length".into()))?;
+        let ss = key.decapsulate(&c).map_err(|_| Error::Crypto("ML-KEM-768 decapsulation".into()))?;
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&ss);
+        Ok(out)
+    }
+
+    fn ed25519_public(&self, seed: &[u8; 32]) -> Result<[u8; 32]> {
+        Ok(ed25519_dalek::SigningKey::from_bytes(seed).verifying_key().to_bytes())
+    }
+
+    fn ed25519_sign(&self, seed: &[u8; 32], msg: &[u8]) -> Result<[u8; 64]> {
+        use ed25519_dalek::Signer;
+        Ok(ed25519_dalek::SigningKey::from_bytes(seed).sign(msg).to_bytes())
+    }
+
+    fn ed25519_verify(&self, public: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> bool {
+        use ed25519_dalek::Verifier;
+        match ed25519_dalek::VerifyingKey::from_bytes(public) {
+            Ok(vk) => vk.verify(msg, &ed25519_dalek::Signature::from_bytes(sig)).is_ok(),
+            Err(_) => false,
+        }
+    }
+
     fn sha256(&self, parts: &[&[u8]]) -> [u8; 32] {
         let mut h = Sha256::new();
         for p in parts {

@@ -39,7 +39,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
+import androidx.fragment.app.FragmentActivity
 import com.qscrypt.app.AppState
+import com.qscrypt.app.PhoneAuth
 import com.qscrypt.app.Prefs
 import com.qscrypt.app.R
 import kotlinx.coroutines.Dispatchers
@@ -88,7 +91,7 @@ private fun Key(label: String? = null, icon: Int? = null, iconTint: androidx.com
 
 /** Digits laid out left-to-right like a phone keypad, even in RTL. */
 @Composable
-private fun PinPad(enabled: Boolean, onDigit: (Char) -> Unit, onBackspace: () -> Unit, onBiometric: () -> Unit) {
+private fun PinPad(enabled: Boolean, showBiometric: Boolean, onDigit: (Char) -> Unit, onBackspace: () -> Unit, onBiometric: () -> Unit) {
     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
             for (row in listOf("123", "456", "789")) {
@@ -97,7 +100,11 @@ private fun PinPad(enabled: Boolean, onDigit: (Char) -> Unit, onBackspace: () ->
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(30.dp)) {
-                Key(icon = R.drawable.ic_finger, iconTint = Qs.brass, description = "البصمة", enabled = enabled, onClick = onBiometric)
+                if (showBiometric) {
+                    Key(icon = R.drawable.ic_finger, iconTint = Qs.brass, description = "بصمة الهاتف", enabled = enabled, onClick = onBiometric)
+                } else {
+                    Box(Modifier.size(72.dp))
+                }
                 Key(label = "0", enabled = enabled) { onDigit('0') }
                 Key(icon = R.drawable.ic_backspace, description = "حذف", enabled = enabled, onClick = onBackspace)
             }
@@ -106,7 +113,7 @@ private fun PinPad(enabled: Boolean, onDigit: (Char) -> Unit, onBackspace: () ->
 }
 
 @Composable
-private fun PinLayout(title: String, subtitle: String, pin: String, error: Boolean, busy: Boolean, padEnabled: Boolean, footer: @Composable () -> Unit, onDigit: (Char) -> Unit, onBackspace: () -> Unit, onBiometric: () -> Unit) {
+private fun PinLayout(title: String, subtitle: String, pin: String, error: Boolean, busy: Boolean, padEnabled: Boolean, footer: @Composable () -> Unit, onDigit: (Char) -> Unit, onBackspace: () -> Unit, onBiometric: () -> Unit, showBiometric: Boolean = false) {
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -122,7 +129,7 @@ private fun PinLayout(title: String, subtitle: String, pin: String, error: Boole
             if (busy) CircularProgressIndicator(color = Qs.brass, strokeWidth = 2.dp, modifier = Modifier.size(22.dp)) else PinDots(pin.length, error)
         }
         Gap(36.dp)
-        PinPad(enabled = padEnabled && !busy, onDigit = onDigit, onBackspace = onBackspace, onBiometric = onBiometric)
+        PinPad(enabled = padEnabled && !busy, showBiometric = showBiometric, onDigit = onDigit, onBackspace = onBackspace, onBiometric = onBiometric)
         Gap(28.dp)
         footer()
         Gap(24.dp)
@@ -197,14 +204,33 @@ fun PinSetupScreen(onDone: () -> Unit) {
 /** Unlocks the app. Repeated failures lock entry out for growing periods. */
 @Composable
 fun LockScreen() {
+    val context = LocalContext.current
+    val activity = context as? FragmentActivity
+    val mode = remember { PhoneAuth.mode(context) }
     var pin by remember { mutableStateOf("") }
     var error by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var recovery by remember { mutableStateOf(false) }
-    var biometric by remember { mutableStateOf(false) }
+    // Two-factor: the PIN was right, the phone's lock is next.
+    var secondStep by remember { mutableStateOf(false) }
+    var phoneError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val lockedFor = (Prefs.lockUntil - now).coerceAtLeast(0)
+
+    fun unlocked() {
+        Prefs.failCount = 0
+        Prefs.lockUntil = 0
+        AppState.locked = false
+    }
+
+    fun askPhone() {
+        val a = activity ?: return
+        phoneError = null
+        PhoneAuth.prompt(a, "QsCrypt", if (secondStep) "الخطوة الثانية: قفل الهاتف" else "افتح بقفل الهاتف") { ok, msg ->
+            if (ok) unlocked() else phoneError = msg ?: "لم يتم التأكيد"
+        }
+    }
 
     LaunchedEffect(lockedFor > 0) {
         while (Prefs.lockUntil > System.currentTimeMillis()) {
@@ -213,10 +239,48 @@ fun LockScreen() {
         }
         now = System.currentTimeMillis()
     }
+    LaunchedEffect(Unit) {
+        if (mode == PhoneAuth.Mode.Either && Prefs.lockUntil <= System.currentTimeMillis()) askPhone()
+    }
+
+    if (secondStep) {
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Gap(96.dp)
+            Box(Modifier.size(112.dp).clip(CircleShape).background(Qs.surface).border(1.dp, Qs.brass, CircleShape), contentAlignment = Alignment.Center) {
+                QsIcon(R.drawable.ic_finger, Qs.brass, 52.dp)
+            }
+            Gap(26.dp)
+            Text("الخطوة الثانية", style = T.display, textAlign = TextAlign.Center)
+            Gap(8.dp)
+            Text(
+                "الرمز صحيح. أكّد هويتك ببصمة الهاتف أو وجهك أو رمز قفل الهاتف.",
+                style = T.body.copy(fontSize = 15.sp, lineHeight = 24.sp, color = Qs.muted),
+                textAlign = TextAlign.Center,
+            )
+            if (phoneError != null) {
+                Gap(12.dp)
+                Text(phoneError ?: "", style = T.small.copy(color = Qs.coral), textAlign = TextAlign.Center)
+            }
+            Gap(32.dp)
+            PrimaryButton("تأكيد بقفل الهاتف", icon = R.drawable.ic_finger) { askPhone() }
+            Gap(12.dp)
+            SecondaryButton("رجوع إلى الرمز") {
+                secondStep = false
+                phoneError = null
+            }
+        }
+        LaunchedEffect(Unit) { askPhone() }
+        return
+    }
 
     val subtitle = when {
         lockedFor > 0 -> "محاولات كثيرة خاطئة. انتظر ${(lockedFor + 999) / 1000} ثانية"
         error -> "رمز خاطئ. بقيت ${(5 - Prefs.failCount).coerceAtLeast(0)} محاولات قبل الانتظار"
+        mode == PhoneAuth.Mode.TwoFactor -> "الخطوة الأولى: رمز QsCrypt، ثم قفل الهاتف"
+        mode == PhoneAuth.Mode.Either -> "افتح بقفل الهاتف أو بالرمز السري"
         else -> "افتح QsCrypt بالرمز السري"
     }
     PinLayout(
@@ -226,6 +290,7 @@ fun LockScreen() {
         error = error || lockedFor > 0,
         busy = busy,
         padEnabled = lockedFor == 0L,
+        showBiometric = mode == PhoneAuth.Mode.Either,
         footer = {
             Text("نسيت الرمز؟", style = T.label.copy(color = Qs.brass), modifier = Modifier.clickable { recovery = true }.padding(8.dp))
         },
@@ -241,9 +306,12 @@ fun LockScreen() {
                     busy = false
                     pin = ""
                     if (ok) {
-                        Prefs.failCount = 0
-                        Prefs.lockUntil = 0
-                        AppState.locked = false
+                        if (mode == PhoneAuth.Mode.TwoFactor) {
+                            Prefs.failCount = 0
+                            secondStep = true
+                        } else {
+                            unlocked()
+                        }
                     } else {
                         val n = Prefs.failCount + 1
                         Prefs.failCount = n
@@ -258,26 +326,86 @@ fun LockScreen() {
             }
         },
         onBackspace = { if (pin.isNotEmpty()) pin = pin.dropLast(1) },
-        onBiometric = { biometric = true },
+        onBiometric = { askPhone() },
     )
     if (recovery) {
         QsAlert(
             title = "نسيت الرمز؟",
-            text = "مفتاح الاسترداد قادم في الإصدار التالي. حالياً يمكنك مسح بيانات التطبيق من إعدادات أندرويد: تُحذف قائمة الخزنات والرمز فقط، وتبقى حاوياتك وملفاتك المشفّرة سليمة وتفتحها بكلمات مرورها.",
+            text = if (mode == PhoneAuth.Mode.Either) {
+                "يمكنك الدخول بقفل الهاتف، ثم تغيير الرمز من الإعدادات."
+            } else {
+                "امسح بيانات التطبيق من إعدادات أندرويد: تُحذف قائمة الخزنات والرمز وجهات الاتصال فقط، وتبقى حاوياتك وملفاتك المشفّرة سليمة وتفتحها بكلمات مرورها أو بمفاتيح الاسترداد."
+            },
             confirm = "حسناً",
             dismiss = null,
             onConfirm = { recovery = false },
             onDismiss = { recovery = false },
         )
     }
-    if (biometric) {
-        QsAlert(
-            title = "البصمة",
-            text = "الفتح بالبصمة قادم في الإصدار التالي.",
-            confirm = "حسناً",
-            dismiss = null,
-            onConfirm = { biometric = false },
-            onDismiss = { biometric = false },
+}
+
+/** After the PIN is created: offer the phone's lock as a second factor. */
+@Composable
+fun TwoFactorSetupScreen(onDone: () -> Unit) {
+    val context = LocalContext.current
+    val activity = context as? FragmentActivity
+    var choice by remember { mutableStateOf(PhoneAuth.Mode.TwoFactor) }
+    var error by remember { mutableStateOf<String?>(null) }
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Gap(64.dp)
+        Box(Modifier.size(96.dp).clip(CircleShape).background(Qs.surface).border(1.dp, Qs.brass, CircleShape), contentAlignment = Alignment.Center) {
+            QsIcon(R.drawable.ic_finger, Qs.brass, 44.dp)
+        }
+        Gap(22.dp)
+        Text("المصادقة الثنائية", style = T.display, textAlign = TextAlign.Center)
+        Gap(8.dp)
+        Text(
+            "اربط قفل QsCrypt بقفل هاتفك: بصمة أو وجه، ورمز قفل الهاتف احتياطاً. لا يغادر شيء من ذلك الهاتف، وQsCrypt لا يرى بصمتك.",
+            style = T.body.copy(fontSize = 15.sp, lineHeight = 24.sp, color = Qs.muted),
+            textAlign = TextAlign.Center,
         )
+        Gap(26.dp)
+        for ((m, title, sub) in listOf(
+            Triple(PhoneAuth.Mode.TwoFactor, "الرمز + قفل الهاتف", "الأقوى: يلزم الاثنان معاً (موصى به)"),
+            Triple(PhoneAuth.Mode.Either, "قفل الهاتف أو الرمز", "الأسرع: أيّهما يكفي"),
+            Triple(PhoneAuth.Mode.Pin, "الرمز فقط", "بدون قفل الهاتف"),
+        )) {
+            QsCard(Modifier.fillMaxWidth().padding(vertical = 5.dp), glow = choice == m, onClick = { choice = m }) {
+                Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(title, style = T.item)
+                        Text(sub, style = T.small)
+                    }
+                    Box(Modifier.size(22.dp).clip(CircleShape).border(2.dp, if (choice == m) Qs.brass else Qs.muted, CircleShape), contentAlignment = Alignment.Center) {
+                        if (choice == m) Box(Modifier.size(11.dp).clip(CircleShape).background(Qs.brass))
+                    }
+                }
+            }
+        }
+        if (error != null) {
+            Gap(10.dp)
+            Text(error ?: "", style = T.small.copy(color = Qs.coral), textAlign = TextAlign.Center)
+        }
+        Gap(22.dp)
+        PrimaryButton("متابعة") {
+            if (choice == PhoneAuth.Mode.Pin || activity == null) {
+                Prefs.lockMode = PhoneAuth.Mode.Pin.id
+                onDone()
+            } else {
+                // Confirm once now, so the user knows it works.
+                PhoneAuth.prompt(activity, "QsCrypt", "تأكيد ربط قفل الهاتف") { ok, msg ->
+                    if (ok) {
+                        Prefs.lockMode = choice.id
+                        onDone()
+                    } else {
+                        error = msg ?: "لم يتم التأكيد"
+                    }
+                }
+            }
+        }
+        Gap(24.dp)
     }
 }

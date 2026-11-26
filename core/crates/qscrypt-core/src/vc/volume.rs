@@ -12,6 +12,8 @@ pub struct EncVolume {
     chain: CipherChain,
     data_offset: u64,
     data_size: u64,
+    /// XTS unit number of the first data unit (VeraCrypt: data_offset / 512).
+    unit_base: u64,
     read_only: bool,
     /// Absolute byte range of a hidden volume that writes must not touch.
     protect: Option<(u64, u64)>,
@@ -28,8 +30,19 @@ impl EncVolume {
         if data_offset + data_size > disk.len() {
             return Err(Error::corrupt("data area beyond end of file"));
         }
+        EncVolume::with_unit_base(disk, chain, data_offset, data_size, read_only, data_offset / UNIT)
+    }
+
+    /// Like `new`, with an explicit number for the first data unit.
+    pub fn with_unit_base(disk: Box<dyn Disk>, chain: CipherChain, data_offset: u64, data_size: u64, read_only: bool, unit_base: u64) -> Result<EncVolume> {
+        if data_offset % UNIT != 0 || data_size % UNIT != 0 {
+            return Err(Error::corrupt("unaligned data area"));
+        }
+        if data_offset + data_size > disk.len() {
+            return Err(Error::corrupt("data area beyond end of file"));
+        }
         let read_only = read_only || disk.is_read_only();
-        Ok(EncVolume { disk, chain, data_offset, data_size, read_only, protect: None, tripped: false })
+        Ok(EncVolume { disk, chain, data_offset, data_size, unit_base, read_only, protect: None, tripped: false })
     }
 
     /// Hidden volume protection: refuse writes overlapping `[start, end)`
@@ -62,12 +75,12 @@ impl EncVolume {
     /// Reads and decrypts whole units [first, first + count).
     fn read_units(&mut self, first: u64, buf: &mut [u8]) -> Result<()> {
         self.disk.read_at(self.data_offset + first * UNIT, buf)?;
-        self.chain.decrypt(buf, UNIT as usize, (self.data_offset / UNIT) + first);
+        self.chain.decrypt(buf, UNIT as usize, self.unit_base + first);
         Ok(())
     }
 
     fn write_units(&mut self, first: u64, buf: &mut [u8]) -> Result<()> {
-        self.chain.encrypt(buf, UNIT as usize, (self.data_offset / UNIT) + first);
+        self.chain.encrypt(buf, UNIT as usize, self.unit_base + first);
         self.disk.write_at(self.data_offset + first * UNIT, buf)
     }
 }

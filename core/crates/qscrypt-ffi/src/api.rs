@@ -20,20 +20,33 @@ pub fn backend() -> &'static dyn Backend {
     &BACKEND
 }
 
-struct Vault {
-    fs: Box<dyn FileSystem>,
-    format: Format,
-    ea: Ea,
-    prf: Prf,
-    hidden: bool,
+pub(crate) struct Vault {
+    pub fs: Box<dyn FileSystem>,
+    /// "VeraCrypt", "TrueCrypt", "BitLocker", "QsCrypt".
+    pub kind: String,
+    /// Cipher description ("AES", "XTS-AES 128"...).
+    pub cipher: String,
+    pub prf: String,
+    pub hidden: bool,
+    pub protected: bool,
+    /// Policy facts the app needs after opening (QsCrypt containers).
+    pub extra: String,
 }
 
-fn vaults() -> &'static Mutex<HashMap<i64, Arc<Mutex<Vault>>>> {
+pub(crate) fn register(v: Vault) -> (i64, String) {
+    let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    let mut v = v;
+    let json = info_json(handle, &mut v);
+    vaults().lock().unwrap_or_else(|e| e.into_inner()).insert(handle, Arc::new(Mutex::new(v)));
+    (handle, json)
+}
+
+pub(crate) fn vaults() -> &'static Mutex<HashMap<i64, Arc<Mutex<Vault>>>> {
     static V: OnceLock<Mutex<HashMap<i64, Arc<Mutex<Vault>>>>> = OnceLock::new();
     V.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn vault(handle: i64) -> Result<Arc<Mutex<Vault>>, Error> {
+pub(crate) fn vault(handle: i64) -> Result<Arc<Mutex<Vault>>, Error> {
     vaults().lock().unwrap_or_else(|e| e.into_inner()).get(&handle).cloned().ok_or_else(|| Error::invalid("the vault is closed"))
 }
 
@@ -41,20 +54,20 @@ pub fn err_json(code: &str, message: &str) -> String {
     Obj::new().bool("ok", false).str("code", code).str("message", message).end()
 }
 
-fn err(e: &Error) -> String {
+pub(crate) fn err(e: &Error) -> String {
     err_json(e.code(), &e.to_string())
 }
 
-fn ok() -> String {
+pub(crate) fn ok() -> String {
     Obj::new().bool("ok", true).end()
 }
 
-fn reply(r: Result<String, Error>) -> String {
+pub(crate) fn reply(r: Result<String, Error>) -> String {
     r.unwrap_or_else(|e| err(&e))
 }
 
 #[cfg(unix)]
-fn file_from_fd(fd: i32) -> Result<File, Error> {
+pub(crate) fn file_from_fd(fd: i32) -> Result<File, Error> {
     use std::os::fd::BorrowedFd;
     if fd < 0 {
         return Err(Error::invalid("bad file descriptor"));
@@ -64,17 +77,17 @@ fn file_from_fd(fd: i32) -> Result<File, Error> {
 }
 
 #[cfg(not(unix))]
-fn file_from_fd(_fd: i32) -> Result<File, Error> {
+pub(crate) fn file_from_fd(_fd: i32) -> Result<File, Error> {
     Err(Error::unsupported("file descriptors on this platform"))
 }
 
 #[cfg(unix)]
-fn disk_from_fd(fd: i32, read_only: bool) -> Result<FileDisk, Error> {
+pub(crate) fn disk_from_fd(fd: i32, read_only: bool) -> Result<FileDisk, Error> {
     FileDisk::from_borrowed_fd(fd, read_only)
 }
 
 #[cfg(not(unix))]
-fn disk_from_fd(_fd: i32, _read_only: bool) -> Result<FileDisk, Error> {
+pub(crate) fn disk_from_fd(_fd: i32, _read_only: bool) -> Result<FileDisk, Error> {
     Err(Error::unsupported("file descriptors on this platform"))
 }
 
@@ -124,10 +137,12 @@ fn info_json(handle: i64, v: &mut Vault) -> String {
     Obj::new()
         .bool("ok", true)
         .int("handle", handle)
-        .str("format", v.format.name())
-        .str("ea", v.ea.name())
-        .str("prf", v.prf.name())
+        .str("format", &v.kind)
+        .str("ea", &v.cipher)
+        .str("prf", &v.prf)
         .bool("hidden", v.hidden)
+        .bool("protected", v.protected)
+        .raw("extra", if v.extra.is_empty() { "{}" } else { &v.extra })
         .str("fs", v.fs.kind())
         .str("label", &v.fs.label())
         .bool("readOnly", v.fs.read_only())
@@ -152,11 +167,16 @@ pub fn open_volume(fd: i32, password: &[u8], pim: u32, prf: u32, format: i32, re
         let chain = CipherChain::new(backend(), found.ea, &found.header.master_keys)?;
         let volume = vc::EncVolume::new(Box::new(disk), chain, found.header.data_offset, found.header.data_size, read_only)?;
         let fs = fs::mount(Box::new(volume), read_only, tz_minutes)?;
-        let mut v = Vault { fs, format: found.header.format, ea: found.ea, prf: found.prf, hidden: found.hidden };
-        let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-        let json = info_json(handle, &mut v);
-        vaults().lock().unwrap_or_else(|e| e.into_inner()).insert(handle, Arc::new(Mutex::new(v)));
-        Ok(json)
+        let v = Vault {
+            fs,
+            kind: found.header.format.name().into(),
+            cipher: found.ea.name().into(),
+            prf: found.prf.name().into(),
+            hidden: found.hidden,
+            protected: false,
+            extra: String::new(),
+        };
+        Ok(register(v).1)
     })())
 }
 
@@ -176,7 +196,7 @@ pub fn close_all() {
     }
 }
 
-fn with_vault<T>(handle: i64, f: impl FnOnce(&mut Vault) -> Result<T, Error>) -> Result<T, Error> {
+pub(crate) fn with_vault<T>(handle: i64, f: impl FnOnce(&mut Vault) -> Result<T, Error>) -> Result<T, Error> {
     let v = vault(handle)?;
     let mut guard = v.lock().unwrap_or_else(|e| e.into_inner());
     f(&mut guard)
@@ -193,6 +213,16 @@ pub fn list(handle: i64, path: &str) -> String {
         let items = entries.iter().map(|e| Obj::new().str("name", &e.name).bool("dir", e.is_dir).uint("size", e.size).int("mtime", e.modified).end());
         Ok(Obj::new().bool("ok", true).str("path", path).raw("entries", &array(items)).end())
     }))
+}
+
+pub fn read_range(handle: i64, path: &str, offset: u64, len: usize) -> Option<Vec<u8>> {
+    with_vault(handle, |v| {
+        let mut buf = vec![0u8; len.min(8 << 20)];
+        let n = v.fs.read_range(path, offset, &mut buf)?;
+        buf.truncate(n);
+        Ok(buf)
+    })
+    .ok()
 }
 
 pub fn read_file(handle: i64, path: &str, max_bytes: u64) -> Option<Vec<u8>> {
@@ -304,10 +334,21 @@ pub fn sniff(fd: i32) -> String {
         let mut f = file_from_fd(fd)?;
         let size = std::io::Seek::seek(&mut f, std::io::SeekFrom::End(0))?;
         std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(0))?;
-        let mut head = [0u8; 8];
-        let n = f.read(&mut head)?;
-        let kind = if qsc::is_qsc(&head[..n]) {
+        let mut head = [0u8; 512];
+        let mut n = 0;
+        while n < head.len() {
+            let k = f.read(&mut head[n..])?;
+            if k == 0 {
+                break;
+            }
+            n += k;
+        }
+        let kind = if qscrypt_core::qvol::is_container(&head[..n]) {
+            "container"
+        } else if qsc::is_qsc(&head[..n]) {
             "qscrypt"
+        } else if n == 512 && qscrypt_core::bde::is_bitlocker(&head) {
+            "bitlocker"
         } else if size >= vc::DATA_OFFSET * 2 {
             "volume"
         } else {
