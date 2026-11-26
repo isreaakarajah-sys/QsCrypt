@@ -6,17 +6,45 @@ jobs:
   fetch:
     runs-on: ubuntu-latest
     steps:
-      - name: cryptsetup bitlk.c
-        run: curl -fsSL https://gitlab.com/cryptsetup/cryptsetup/-/raw/main/lib/bitlk/bitlk.c | cat -n || echo FAILED
-      - name: cryptsetup bitlk.h
-        run: curl -fsSL https://gitlab.com/cryptsetup/cryptsetup/-/raw/main/lib/bitlk/bitlk.h | cat -n || echo FAILED
-      - name: cryptsetup bitlk test script
-        run: curl -fsSL https://gitlab.com/cryptsetup/cryptsetup/-/raw/main/tests/bitlk-compat-test | cat -n || echo FAILED
-      - name: libbde format doc
-        run: curl -fsSL "https://raw.githubusercontent.com/libyal/libbde/main/documentation/BitLocker%20Drive%20Encryption%20(BDE)%20format.asciidoc" | cat -n || echo FAILED
-      - name: dislocker sources
+      - name: BitLocker test images
         run: |
-          for f in src/encryption/diffuser.c src/encryption/decrypt.c src/encryption/encrypt.c src/encryption/crypto.c src/inouts/sectors.c src/inouts/inouts.c src/metadata/metadata.c src/metadata/datums.c include/dislocker/metadata/datums.h include/dislocker/metadata/metadata.priv.h src/accesses/user_pass/user_pass.c src/accesses/stretch_key.c src/accesses/rp/recovery_password.c src/encryption/aes-xts.c; do
-            echo "=================== $f"
-            curl -fsSL https://raw.githubusercontent.com/Aorimn/dislocker/master/$f | cat -n || echo "FAILED $f"
-          done
+          curl -fsSL https://gitlab.com/cryptsetup/cryptsetup/-/raw/main/tests/bitlk-images.tar.xz -o b.tar.xz || { echo FAILED; exit 0; }
+          ls -la b.tar.xz; tar xJf b.tar.xz; ls -laR bitlk-images | head -60
+          cat bitlk-images/images.conf
+      - name: Dump metadata of a few images
+        run: |
+          cd bitlk-images
+          python3 - <<'PY'
+          import struct, glob, os
+          for f in sorted(glob.glob('bitlk-*.img')):
+              d = open(f,'rb').read()
+              print("=====", f, len(d))
+              sig = d[3:11]
+              togo = sig == b'MSWIN4.1'
+              base = 424 if togo else 160
+              offs = struct.unpack_from('<3Q', d, base+16)
+              print("sig", sig, "boot", d[:3].hex(), "bps", struct.unpack_from('<H', d, 11)[0], "spc", d[13], "offs", offs)
+              mo = offs[0]
+              blk = d[mo:mo+64]
+              fve_size = struct.unpack_from('<H', blk, 8)[0]
+              print("block hdr", blk.hex())
+              real = fve_size << 4
+              print("fve_size", fve_size, "real", real)
+              md = d[mo+64:mo+112]
+              msize = struct.unpack_from('<I', md, 0)[0]
+              print("meta hdr", md.hex(), "msize", msize)
+              ents = d[mo+112:mo+64+msize]
+              p = 0
+              while p + 8 <= len(ents):
+                  sz, et, vt, ver = struct.unpack_from('<4H', ents, p)
+                  if sz == 0: break
+                  print("  entry size=%d type=0x%x value=0x%x ver=%d" % (sz, et, vt, ver))
+                  print("   ", ents[p:p+sz].hex())
+                  p += sz
+              val = d[mo+real:mo+real+96]
+              print("validation", val.hex())
+              # first bytes of header backup area location
+              print("after", d[mo+real+96:mo+real+160].hex())
+              if f.endswith('xts-128.img') or 'togo' in f:
+                  print("sector0", d[:512].hex())
+          PY
