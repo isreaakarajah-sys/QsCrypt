@@ -46,6 +46,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qscrypt.app.AppState
+import com.qscrypt.app.Fill
 import com.qscrypt.app.Call
 import com.qscrypt.app.Container
 import com.qscrypt.app.Identity
@@ -208,7 +209,12 @@ fun NewEncryptionScreen() {
             Gap(10.dp)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 TargetCard(Modifier.weight(1f), R.drawable.ic_usb, "فلاشة أو هارد", "تشفير قرص USB كامل عبر OTG", target == 2) { target = 2 }
-                TargetCard(Modifier.weight(1f), R.drawable.ic_image, "داخل صورة", "إخفاء ملف مشفّر في صورة عادية", target == 3) { target = 3 }
+                TargetCard(Modifier.weight(1f), R.drawable.ic_image, "داخل صورة", "ملف مشفّر يبدو صورة عادية وتُفتح كصورة", target == 3) { target = 3 }
+            }
+            Gap(10.dp)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                TargetCard(Modifier.weight(1f), R.drawable.ic_users, "رسالة QR", "نص سري ينتقل بين هاتفين بالتصوير", target == 4) { target = 4 }
+                Spacer(Modifier.weight(1f))
             }
             Gap(22.dp)
             when (target) {
@@ -224,7 +230,8 @@ fun NewEncryptionScreen() {
                 }
                 1 -> Note("تُشفّر الملفات بصيغة QsCrypt بثلاث طبقات، ويمكنك ربطها بجهات اتصالك أو إضافة مزايا الحماية. يُنشأ لكل ملف نسخة ‎.qsc‎ ويبقى الأصل كما هو.")
                 2 -> Note("وصّل الفلاشة أو الهارد بالجوال بوصلة OTG، ثم اختره من تبويب «الأقراص» واضغط «تشفير». تُدعم صيغ VeraCrypt وBitLocker وQsCrypt وTrueCrypt، والقرص يُمسح بالكامل.", icon = R.drawable.ic_usb)
-                else -> Note("يُشفَّر الملف أولاً بـ QsCrypt ثم يُخفى في بكسلات صورة تختارها، فتبدو صورة عادية. أرسلها «كملف» لا «كصورة»، لأن تطبيقات المراسلة تضغط الصور فيضيع المخفي.", icon = R.drawable.ic_image)
+                3 -> Note("يُشفَّر الملف بـ QsCrypt ثم يُخفى في صورة تختارها: تبقى صورة عادية تُفتح في أي معرض، ولأي حجم من الملفات. أرسلها «كملف» لا «كصورة»، لأن تطبيقات المراسلة تضغط الصور فيضيع المخفي.", icon = R.drawable.ic_image)
+                else -> Note("رسالة نصية قصيرة تُشفَّر في رمز QR: يصوّره صديقك بكاميرا QsCrypt فيقرؤها، بلا إنترنت ولا بلوتوث. تُقرأ بكلمة مرور أو بهوية جهة الاتصال.", icon = R.drawable.ic_users)
             }
             Gap(20.dp)
         }
@@ -234,7 +241,8 @@ fun NewEncryptionScreen() {
                     0 -> AppState.push(Screen.NewContainer(format))
                     1 -> AppState.push(Screen.QscEncrypt)
                     2 -> AppState.tab(Screen.Drives)
-                    else -> AppState.push(Screen.Stego)
+                    3 -> AppState.push(Screen.Stego)
+                    else -> AppState.push(Screen.Message)
                 }
             }
             Gap(24.dp)
@@ -267,6 +275,29 @@ fun recipientCards(context: android.content.Context, p: Protection): JSONArray {
     return cards
 }
 
+/** How the new volume's free space is written: now, in the background, or not at all. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun FillChoice(mode: Int, hidden: Boolean, onChange: (Int) -> Unit) {
+    Text("التهيئة", style = T.label)
+    Gap(8.dp)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Chip("سريعة + ملء في الخلفية", mode == 1 && !hidden, enabled = !hidden) { onChange(1) }
+        Chip("كاملة الآن", mode == 0 || hidden) { onChange(0) }
+        Chip("سريعة فقط", mode == 2 && !hidden, enabled = !hidden) { onChange(2) }
+    }
+    Gap(6.dp)
+    Text(
+        when {
+            hidden -> "المجلد المخفي يتطلب التهيئة الكاملة: يُكتب القرص كله الآن."
+            mode == 1 -> "تُستخدم فوراً، وتُملأ المساحة الفارغة ببيانات مشفّرة في الخلفية: يمكن إيقافها مؤقتاً، وتُستأنف عند فتحها لاحقاً. الموصى به."
+            mode == 0 -> "يُكتب القرص كله مشفّراً قبل الاستخدام. أبطأ، لكنه يمنع من البداية معرفة مقدار ما كُتب فيه."
+            else -> "الأسرع، لكن المساحة الفارغة تبقى كما كانت (قد تكشف حجم ما كُتب، أو بيانات قديمة على فلاشة مستعملة)."
+        },
+        style = T.small,
+    )
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun NewContainerScreen(format: String, usb: UsbTarget? = null) {
@@ -287,7 +318,8 @@ fun NewContainerScreen(format: String, usb: UsbTarget? = null) {
     var ea by remember { mutableIntStateOf(1) }
     var prf by remember { mutableIntStateOf(1) }
     var method by remember { mutableStateOf("xts128") }
-    var quick by remember { mutableStateOf(false) }
+    /** 0: write the whole volume now; 1: quick format, then fill free space in the background; 2: quick only. */
+    var fillMode by remember { mutableIntStateOf(1) }
     val keyfiles = remember { mutableStateListOf<Keyfile>() }
     var hidden by remember { mutableStateOf(false) }
     var hiddenMb by remember { mutableStateOf("") }
@@ -345,7 +377,11 @@ fun NewContainerScreen(format: String, usb: UsbTarget? = null) {
         busy = Busy(
             if (usb != null) "تشفير القرص" else "إنشاء الحاوية",
             0f,
-            if (quick) "تهيئة سريعة: تُكتب البيانات الوصفية فقط." else "يُكتب القرص كاملاً مشفّراً، وقد يستغرق ذلك دقائق للأحجام الكبيرة.",
+            when {
+                hidden || fillMode == 0 -> "يُكتب القرص كاملاً مشفّراً، وقد يستغرق ذلك دقائق للأحجام الكبيرة."
+                fillMode == 1 -> "تهيئة سريعة الآن، ثم تُملأ المساحة الفارغة ببيانات مشفّرة في الخلفية."
+                else -> "تهيئة سريعة: تُكتب البيانات الوصفية فقط."
+            },
         )
         scope.launch {
             val target: UsbTarget? = if (usb != null && bitlocker && usb.start == 0L) {
@@ -366,7 +402,7 @@ fun NewContainerScreen(format: String, usb: UsbTarget? = null) {
             }
             val created = withContext(Dispatchers.IO) {
                 val call = Call("volume.create").put("format", engineFormat).put("size", bytes).put("fs", fsChoice)
-                    .put("label", if (usb != null) "QsCrypt" else name.trim()).put("quick", quick && !hidden && !qs)
+                    .put("label", if (usb != null) "QsCrypt" else name.trim()).put("quick", fillMode != 0 && !hidden)
                 when {
                     vc -> {
                         call.put("ea", ea).put("prf", prf).put("pim", pimValue)
@@ -449,7 +485,10 @@ fun NewContainerScreen(format: String, usb: UsbTarget? = null) {
             busy = null
             if (opened.ok) {
                 val info = VolumeInfo.from(opened.json)
-                AppState.sessions.add(Session(info.handle, container, info, System.currentTimeMillis(), target))
+                val session = Session(info.handle, container, info, System.currentTimeMillis(), target)
+                AppState.opened(session)
+                // Usable at once; the free space fills in the background (pausable, resumes later).
+                if (fillMode == 1 && !hidden) Fill.schedule(context, session)
                 AppState.replaceTop(Screen.Vault(info.handle))
             } else {
                 message = "تم الإنشاء، لكن تعذّر فتحه الآن: ${opened.error}"
@@ -633,6 +672,10 @@ fun NewContainerScreen(format: String, usb: UsbTarget? = null) {
                 }
                 else -> ProtectionEditor(protection, container = true, hasIdentity = hasIdentity, hasPassword = password.isNotEmpty())
             }
+            if (qs) {
+                Gap(14.dp)
+                FillChoice(fillMode, false) { fillMode = it }
+            }
             if (!qs) {
                 Gap(8.dp)
                 Text(
@@ -641,10 +684,7 @@ fun NewContainerScreen(format: String, usb: UsbTarget? = null) {
                     modifier = Modifier.clickable { advanced = !advanced }.padding(vertical = 12.dp),
                 )
                 if (advanced) {
-                    OptionRow(R.drawable.ic_clock, "تهيئة سريعة", if (hidden) "غير متاحة مع المجلد المخفي" else "أسرع، لكن المساحة الفارغة لا تُملأ ببيانات عشوائية") {
-                        QsSwitch(quick && !hidden, enabled = !hidden) { quick = it }
-                    }
-                    Text("التهيئة الكاملة تمنع معرفة مقدار ما كُتب في القرص، وهي الأنسب للفلاشات.", style = T.small)
+                    FillChoice(fillMode, hidden) { fillMode = it }
                 }
             }
             Gap(20.dp)

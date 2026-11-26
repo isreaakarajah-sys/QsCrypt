@@ -30,6 +30,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.qscrypt.app.AppState
 import com.qscrypt.app.Call
+import com.qscrypt.app.Jobs
+import com.qscrypt.app.Prefs
 import com.qscrypt.app.QsCore
 import com.qscrypt.app.R
 import com.qscrypt.app.Reply
@@ -103,13 +105,21 @@ fun StegoScreen() {
     var message by remember { mutableStateOf<String?>(null) }
     var revealed by remember { mutableStateOf<File?>(null) }
     var revealedName by remember { mutableStateOf("") }
+    /** 0: the file follows the picture (any size); 1: spread over the pixels (small files). */
+    var method by remember { mutableIntStateOf(0) }
+    var coverKind by remember { mutableStateOf("") }
+    var job by remember { mutableStateOf<Jobs.Job?>(null) }
+    val cancel = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
     // Encrypted payload is the file plus a small header; keep a margin.
-    val fits = cover != null && secret != null && secret!!.size + 4096 <= cover!!.capacity
+    val fits = cover != null && secret != null && (method == 0 && coverKind.isNotEmpty() || secret!!.size + 4096 <= cover!!.capacity)
 
     val pickCover = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
         scope.launch {
             val c = withContext(Dispatchers.IO) { readCover(context, uri) }
+            coverKind = withContext(Dispatchers.IO) {
+                Saf.open(context, uri, "r")?.use { Call("disguise.probe").fd("in", it.fd).run() }?.json?.optString("kind").orEmpty()
+            }
             if (c == null) message = "تعذّرت قراءة الصورة." else cover = c
         }
     }
@@ -123,6 +133,55 @@ fun StegoScreen() {
         image = uri
         imageName = Saf.meta(context, uri).name
     }
+
+    /** The picture opens as itself; the encrypted file follows its last byte. */
+    fun wrapInto(out: Uri) {
+        val c = cover
+        val s = secretUri
+        val meta = secret
+        if (c == null || s == null || meta == null) return
+        val pw = password.toByteArray(Charsets.UTF_8)
+        job = Jobs.start(context, "encrypt", "إخفاء «${meta.name}» في صورة", onEnd = { j ->
+            if (j.state == Jobs.State.Done) {
+                password = ""
+                confirm = ""
+            } else {
+                Saf.delete(context, out)
+            }
+        }) work@{
+            val tmp = File(context.cacheDir, "wrap-${System.nanoTime()}.qsc")
+            try {
+                val total = meta.size.coerceAtLeast(1) * 2
+                val rw = android.os.ParcelFileDescriptor.MODE_READ_WRITE or android.os.ParcelFileDescriptor.MODE_CREATE or android.os.ParcelFileDescriptor.MODE_TRUNCATE
+                detail("تشفير الملف بـ QsCrypt")
+                val enc = Saf.open(context, s, "r")?.use { i ->
+                    android.os.ParcelFileDescriptor.open(tmp, rw).use { o ->
+                        Call("qsc.encrypt").put("size", meta.size).put("name", meta.name)
+                            .put("mtime", System.currentTimeMillis() / 1000).put("now", System.currentTimeMillis() / 1000)
+                            .blob("password", pw.copyOf()).fd("in", i.fd).fd("out", o.fd).run(progress(0, total))
+                    }
+                } ?: return@work Reply("""{"ok":false,"code":"io","message":"cannot open the file"}""")
+                if (!enc.ok) return@work enc
+                if (!checkpoint()) return@work Reply("""{"ok":false,"code":"cancelled"}""")
+                detail("إلحاقه بالصورة")
+                val r = Saf.open(context, c.uri, "r")?.use { cv ->
+                    android.os.ParcelFileDescriptor.open(tmp, android.os.ParcelFileDescriptor.MODE_READ_ONLY).use { t ->
+                        Saf.open(context, out, "w")?.use { o ->
+                            Call("disguise.wrap").fd("cover", cv.fd).fd("in", t.fd).fd("out", o.fd).put("size", tmp.length())
+                                .blob("password", pw.copyOf()).run(progress(meta.size.coerceAtLeast(1), total))
+                        }
+                    }
+                } ?: return@work Reply("""{"ok":false,"code":"io","message":"cannot write the picture"}""")
+                if (!r.ok) return@work r
+                Reply(org.json.JSONObject().put("ok", true).put("summary", "أُخفي «${meta.name}» في الصورة. تُفتح كصورة عادية في أي معرض. أرسلها «كملف» لا كصورة، فتطبيقات المراسلة تضغط الصور ويضيع ما بعدها.").toString())
+            } finally {
+                tmp.delete()
+                pw.fill(0)
+            }
+        }
+    }
+    val saveJpeg = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/jpeg")) { out -> out?.let { wrapInto(it) } }
+    val savePng = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/png")) { out -> out?.let { wrapInto(it) } }
 
     val saveImage = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/png")) { out ->
         val c = cover
@@ -204,9 +263,41 @@ fun StegoScreen() {
         val img = image ?: return
         val pw = password.toByteArray(Charsets.UTF_8)
         busy = Busy("البحث في الصورة", null)
+        cancel.set(false)
         scope.launch {
             val (file, err) = withContext(Dispatchers.IO) {
                 try {
+                    // A file after the end of the picture?
+                    val probe = Saf.open(context, img, "r")?.use { Call("disguise.probe").fd("in", it.fd).run() }
+                    var appendedWrong = false
+                    if (probe != null && probe.ok && probe.json.optLong("trailing") > 0) {
+                        val tmp = File(context.cacheDir, "unwrap.qsc")
+                        val rw = android.os.ParcelFileDescriptor.MODE_READ_WRITE or android.os.ParcelFileDescriptor.MODE_CREATE or android.os.ParcelFileDescriptor.MODE_TRUNCATE
+                        val r = Saf.open(context, img, "r")?.use { i ->
+                            android.os.ParcelFileDescriptor.open(tmp, rw).use { o ->
+                                Call("disguise.unwrap").fd("in", i.fd).fd("out", o.fd).blob("password", pw.copyOf()).run(com.qscrypt.app.Progress { d, t ->
+                                    busy = busy?.copy(title = "فك ما بعد الصورة", fraction = if (t > 0) d.toFloat() / t else null)
+                                    !cancel.get()
+                                })
+                            }
+                        }
+                        if (r != null && r.ok) {
+                            val check = android.os.ParcelFileDescriptor.open(tmp, android.os.ParcelFileDescriptor.MODE_READ_ONLY).use { i ->
+                                Call("qsc.decrypt").blob("password", pw.copyOf()).fd("in", i.fd).context().run()
+                            }
+                            if (check.ok) {
+                                revealedName = check.json.optString("name", "file")
+                                return@withContext tmp to null
+                            }
+                            tmp.delete()
+                            return@withContext null to check.error
+                        }
+                        tmp.delete()
+                        if (r?.code == "cancelled") return@withContext null to null
+                        if (r?.code != "wrong_password") return@withContext null to (r?.error ?: "تعذّرت قراءة الصورة.")
+                        appendedWrong = true
+                    }
+                    if (appendedWrong) Prefs.logAttempt("file", imageName)
                     val (px, _) = loadPixels(context, img, 0, 0, exact = true) ?: return@withContext null to "تعذّرت قراءة الصورة."
                     val payload = QsCore.stegoReveal(px, pw.copyOf()) ?: return@withContext null to "لا يوجد شيء مخفي بكلمة المرور هذه، أو أن الصورة ضُغطت بعد الإخفاء."
                     val tmp = File(context.cacheDir, "revealed.qsc")
@@ -230,7 +321,7 @@ fun StegoScreen() {
             pw.fill(0)
             busy = null
             if (file == null) {
-                message = err
+                if (err != null) message = err
             } else {
                 revealed = file
                 AppState.pickerOpen = true
@@ -241,7 +332,7 @@ fun StegoScreen() {
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
         Gap(20.dp)
-        TopBar("داخل صورة", onBack = { AppState.pop() })
+        TopBar("ملف داخل صورة", onBack = { AppState.pop() })
         Gap(16.dp)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Chip("إخفاء", tab == 0) { tab = 0; password = ""; confirm = "" }
@@ -249,7 +340,19 @@ fun StegoScreen() {
         }
         Gap(18.dp)
         if (tab == 0) {
-            Note("يُشفَّر الملف بـ QsCrypt ثم يتوزّع على البكسلات بترتيب لا يعرفه إلا صاحب كلمة المرور. تبقى الصورة كما تبدو، وتُحفظ بصيغة PNG.", icon = R.drawable.ic_image)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Chip("بعد الصورة (أي حجم)", method == 0) { method = 0 }
+                Chip("داخل البكسلات", method == 1) { method = 1 }
+            }
+            Gap(12.dp)
+            Note(
+                if (method == 0) {
+                    "تبقى الصورة صورة عادية تفتح في أي معرض كما هي، والملف المشفّر مخفيّ بعد نهايتها، بلا أي علامة تدلّ عليه. لأي حجم من الملفات، بصيغة JPEG أو PNG."
+                } else {
+                    "يُشفَّر الملف بـ QsCrypt ثم يتوزّع على البكسلات بترتيب لا يعرفه إلا صاحب كلمة المرور. أصعب كشفاً، لكن للملفات الصغيرة فقط، وتُحفظ بصيغة PNG."
+                },
+                icon = R.drawable.ic_image,
+            )
             Gap(16.dp)
             Text("الصورة الغطاء", style = T.label)
             Gap(8.dp)
@@ -259,7 +362,13 @@ fun StegoScreen() {
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
                         Text(cover?.name ?: "اختر صورة", style = T.item, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(cover?.let { "${it.width}×${it.height} · تتسع لـ ${humanSize(it.capacity)}" } ?: "صورة كبيرة بتفاصيل كثيرة أفضل من صورة سادة", style = T.small)
+                        Text(
+                            cover?.let { c ->
+                                if (method == 0) (if (coverKind.isNotEmpty()) "${c.width}×${c.height} · ${coverKind.uppercase()}" else "صيغة غير مدعومة: اختر JPEG أو PNG")
+                                else "${c.width}×${c.height} · تتسع لـ ${humanSize(c.capacity)}"
+                            } ?: if (method == 0) "أي صورة JPEG أو PNG" else "صورة كبيرة بتفاصيل كثيرة أفضل من صورة سادة",
+                            style = T.small,
+                        )
                     }
                 }
             }
@@ -278,17 +387,22 @@ fun StegoScreen() {
             }
             if (cover != null && secret != null && !fits) {
                 Gap(8.dp)
-                Text("الملف أكبر من سعة هذه الصورة. اختر صورة أكبر أو ملفاً أصغر.", style = T.small.copy(color = Qs.coral))
+                Text(if (method == 0) "اختر صورة JPEG أو PNG." else "الملف أكبر من سعة هذه الصورة. اختر «بعد الصورة»، أو صورة أكبر، أو ملفاً أصغر.", style = T.small.copy(color = Qs.coral))
             }
             Gap(20.dp)
             PasswordPair(password, confirm, { password = it }, { confirm = it })
             Gap(24.dp)
             PrimaryButton("أخفِ واحفظ الصورة", icon = R.drawable.ic_lock, enabled = fits && password.isNotEmpty() && password == confirm) {
                 AppState.pickerOpen = true
-                saveImage.launch("IMG_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".png")
+                val stamp = "IMG_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                when {
+                    method == 1 -> saveImage.launch("$stamp.png")
+                    coverKind == "png" -> savePng.launch("$stamp.png")
+                    else -> saveJpeg.launch("$stamp.jpg")
+                }
             }
         } else {
-            Note("اختر الصورة كما وصلتك (ملف PNG)، وأدخل كلمة المرور التي أُخفي بها الملف.", icon = R.drawable.ic_image)
+            Note("اختر الصورة كما وصلتك، وأدخل كلمة المرور التي أُخفي بها الملف. تُكتشف الطريقتان تلقائياً.", icon = R.drawable.ic_image)
             Gap(16.dp)
             QsCard(onClick = { AppState.pickerOpen = true; pickImage.launch(arrayOf("image/*")) }) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -306,6 +420,7 @@ fun StegoScreen() {
         }
         Gap(24.dp)
     }
-    busy?.let { b -> ProgressDialog(b.title, b.fraction, b.detail) }
+    busy?.let { b -> ProgressDialog(b.title, b.fraction, b.detail, onCancel = { cancel.set(true) }) }
+    job?.let { j -> JobDialog(j, onClose = { job = null }) }
     message?.let { m -> QsAlert("QsCrypt", m, "حسناً", { message = null }, { message = null }, dismiss = null) }
 }

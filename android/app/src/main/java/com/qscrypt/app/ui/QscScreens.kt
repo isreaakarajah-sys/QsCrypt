@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qscrypt.app.AppState
+import com.qscrypt.app.Jobs
 import com.qscrypt.app.Call
 import com.qscrypt.app.Container
 import com.qscrypt.app.FileKeys
@@ -114,68 +115,80 @@ fun QscEncryptScreen() {
         }
     }
 
+    var job by remember { mutableStateOf<Jobs.Job?>(null) }
+    // Files shared from another app with "encrypt as QsCrypt files".
+    LaunchedEffect(Unit) {
+        val preset = AppState.encryptShared
+        AppState.encryptShared = emptyList()
+        for (u in preset) if (files.none { it.uri == u }) Saf.meta(context, u).let { m -> files.add(Picked(u, m.name, m.size)) }
+    }
+
     val folder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
         if (tree == null) return@rememberLauncherForActivityResult
-        cancel.set(false)
         val pw = password.toByteArray(Charsets.UTF_8)
-        scope.launch {
-            // One recovery key and one policy for the whole batch.
-            val key = if (protection.recovery) withContext(Dispatchers.IO) { Call("qsc.recoveryKey").run() }.json.optString("key") else ""
-            val cards = recipientCards(context, protection)
-            val policy = protection.policy()
-            var done = 0
-            var failure: String? = null
-            for ((i, f) in files.withIndex()) {
-                busy = Busy("تشفير (${i + 1}/${files.size})", 0f, f.name)
-                val r = withContext(Dispatchers.IO) {
-                    val out = Saf.createInTree(context, tree, f.name + ".qsc") ?: return@withContext ioError("create")
+        val batch = files.toList()
+        val duress = if (protection.duress && protection.duressPassword.isNotEmpty()) protection.duressPassword.toByteArray(Charsets.UTF_8) else null
+        val sign = protection.sign && hasIdentity
+        val wantRecovery = protection.recovery
+        val cards = recipientCards(context, protection)
+        val policy = protection.policy()
+        val summary = protection.summary()
+        var key = ""
+        // A background job: it can be paused, resumed, and keeps going if you leave this screen.
+        job = Jobs.start(
+            context, "encrypt",
+            if (batch.size == 1) "تشفير «${batch[0].name}»" else "تشفير ${batch.size} ملفات",
+            onEnd = { j ->
+                if (j.state == Jobs.State.Done) {
+                    password = ""
+                    confirm = ""
+                    files.clear()
+                    step = 2
+                    if (key.isNotEmpty()) recovery = key
+                }
+            },
+        ) work@{
+            try {
+                // One recovery key and one policy for the whole batch.
+                if (wantRecovery) key = Call("qsc.recoveryKey").run().json.optString("key")
+                val total = batch.sumOf { it.size.coerceAtLeast(0) }
+                this@work.job.total = total
+                var base = 0L
+                var done = 0
+                for ((i, f) in batch.withIndex()) {
+                    if (!checkpoint()) return@work Reply("""{"ok":false,"code":"cancelled"}""")
+                    detail("${i + 1}/${batch.size} · ${f.name}")
+                    val out = Saf.createInTree(context, tree, f.name + ".qsc") ?: return@work ioError("create")
                     val input = Saf.open(context, f.uri, "r")
                     val output = Saf.open(context, out, "w")
                     if (input == null || output == null) {
                         input?.close()
                         output?.close()
                         Saf.delete(context, out)
-                        return@withContext ioError("open")
+                        return@work ioError("open")
                     }
                     val call = Call("qsc.encrypt").put("size", f.size).put("name", f.name)
                         .put("mtime", System.currentTimeMillis() / 1000).put("now", System.currentTimeMillis() / 1000)
                         .put("policy", policy).put("recipients", cards)
                         .blob("password", if (pw.isNotEmpty()) pw.copyOf() else null)
                         .blob("recoveryKey", if (key.isNotEmpty()) key.toByteArray() else null)
-                    if (protection.duress && protection.duressPassword.isNotEmpty()) call.blob("duress", protection.duressPassword.toByteArray(Charsets.UTF_8))
-                    if (protection.sign && hasIdentity) call.put("sign", true).blob("identity", Identity.secret(context))
-                    val reply = input.use { inp ->
-                        output.use { o ->
-                            call.fd("in", inp.fd).fd("out", o.fd).run(Progress { d, t ->
-                                busy = busy?.copy(fraction = if (t > 0) d.toFloat() / t else null)
-                                !cancel.get()
-                            })
-                        }
+                    if (duress != null) call.blob("duress", duress.copyOf())
+                    if (sign) call.put("sign", true).blob("identity", Identity.secret(context))
+                    val reply = input.use { inp -> output.use { o -> call.fd("in", inp.fd).fd("out", o.fd).run(progress(base, total)) } }
+                    if (!reply.ok) {
+                        Saf.delete(context, out)
+                        return@work Reply(reply.json.put("message", "«${f.name}»: " + reply.json.optString("message")).toString())
                     }
-                    if (!reply.ok) Saf.delete(context, out)
-                    reply
+                    base += f.size.coerceAtLeast(0)
+                    done++
                 }
-                if (!r.ok) {
-                    failure = if (r.code == "cancelled") null else "«${f.name}»: ${r.error}"
-                    break
-                }
-                done++
-            }
-            pw.fill(0)
-            busy = null
-            if (done > 0) {
-                val summary = protection.summary()
-                password = ""
-                confirm = ""
-                files.clear()
-                message = "تم تشفير $done ${if (done == 1) "ملف" else "ملفات"} بصيغة QsCrypt." +
-                    (if (summary.isNotEmpty()) "\n" + summary.joinToString(" · ") else "") +
-                    "\nالملفات الأصلية لم تُحذف؛ احذفها بنفسك إن لم تعد تحتاجها." +
-                    (failure?.let { "\n\nتوقّف عند $it" } ?: "")
-                if (key.isNotEmpty()) recovery = key
-                step = 2
-            } else if (failure != null) {
-                message = failure
+                val text = "تم تشفير $done ${if (done == 1) "ملف" else "ملفات"} بصيغة QsCrypt." +
+                    (if (summary.isNotEmpty()) " " + summary.joinToString(" · ") else "") +
+                    " الملفات الأصلية لم تُحذف؛ احذفها بنفسك إن لم تعد تحتاجها."
+                Reply(JSONObject().put("ok", true).put("summary", text).toString())
+            } finally {
+                pw.fill(0)
+                duress?.fill(0)
             }
         }
     }
@@ -237,6 +250,7 @@ fun QscEncryptScreen() {
         }
         Gap(24.dp)
     }
+    job?.let { j -> JobDialog(j, onClose = { job = null }) }
     busy?.let { b -> ProgressDialog(b.title, b.fraction, b.detail, onCancel = { cancel.set(true) }) }
     message?.let { m -> QsAlert("QsCrypt", m, "حسناً", { message = null }, { message = null }, dismiss = null) }
     recovery?.let { k ->

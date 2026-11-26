@@ -45,6 +45,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qscrypt.app.AppState
+import com.qscrypt.app.Favorites
+import com.qscrypt.app.Jobs
 import com.qscrypt.app.Container
 import com.qscrypt.app.QsCore
 import com.qscrypt.app.R
@@ -178,10 +180,20 @@ fun HomeScreen() {
                         QsField(value = query, onValueChange = { query = it }, placeholder = "ابحث في الخزنات", height = 48.dp, leading = { QsIcon(R.drawable.ic_search, Qs.muted) })
                     }
                 }
+                if (Jobs.list.any { it.active } || Jobs.pending.isNotEmpty()) {
+                    item {
+                        Gap(14.dp)
+                        JobsBanner()
+                    }
+                }
                 if (AppState.sessions.isNotEmpty()) {
                     item {
                         Gap(22.dp)
-                        SectionLabel("مفتوحة الآن", AppState.sessions.size.toString())
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            SectionLabel("مفتوحة الآن", AppState.sessions.size.toString(), modifier = Modifier.weight(1f))
+                            Spacer(Modifier.width(10.dp))
+                            Pill("أقفل الكل", Qs.brass, icon = R.drawable.ic_lock) { AppState.lockAll(context, "home") }
+                        }
                         Gap(10.dp)
                     }
                     items(AppState.sessions.toList(), key = { "s${it.handle}" }) { s ->
@@ -231,22 +243,31 @@ private fun EmptyState(onOpen: () -> Unit) {
 
 @Composable
 private fun OpenVaultCard(s: Session, now: Long) {
+    val context = LocalContext.current
     val used = (s.info.total - s.info.free).coerceAtLeast(0)
+    var confirmClose by remember { mutableStateOf(false) }
     QsCard(onClick = { AppState.push(Screen.Vault(s.handle)) }) {
         Column {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Tile(R.drawable.ic_unlock, Qs.mint)
+                Tile(if (s.plain) R.drawable.ic_usb else R.drawable.ic_unlock, Qs.mint)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(s.container.name.substringBeforeLast('.'), style = T.itemLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(s.container.name.substringBeforeLast('.').ifBlank { s.container.name }, style = T.itemLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Tag(s.info.format)
-                        Tag(s.info.ea)
+                        if (s.plain) Tag("غير مشفّر", TagKind.Outline) else {
+                            Tag(s.info.format)
+                            Tag(s.info.ea)
+                        }
                         Tag(s.info.fs)
                         if (s.info.hidden) Tag("مخفية", TagKind.Mint)
+                        if (Jobs.busy(s.handle)) Tag("عملية جارية", TagKind.Brass)
                     }
                 }
-                IconBtn(R.drawable.ic_lock, "أقفل الخزنة", tint = Qs.brass, border = Qs.brass) { AppState.closeSession(s.handle) }
+                IconBtn(
+                    if (s.usb != null) R.drawable.ic_usb else R.drawable.ic_lock,
+                    if (s.usb != null) "إغلاق وإخراج القرص" else "أقفل الخزنة",
+                    tint = Qs.brass, border = Qs.brass,
+                ) { if (Jobs.busy(s.handle)) confirmClose = true else AppState.safeClose(context, s) }
             }
             Gap(14.dp)
             Row {
@@ -256,6 +277,19 @@ private fun OpenVaultCard(s: Session, now: Long) {
             Gap(8.dp)
             UsageBar(if (s.info.total > 0) used.toFloat() / s.info.total else 0f)
         }
+    }
+    if (confirmClose) {
+        QsAlert(
+            title = "عملية جارية",
+            text = "تعمل عملية في الخلفية على «${s.container.name}». إغلاقها الآن يلغي العملية.",
+            confirm = "ألغِ وأغلق",
+            danger = true,
+            onConfirm = {
+                confirmClose = false
+                AppState.safeClose(context, s)
+            },
+            onDismiss = { confirmClose = false },
+        )
     }
 }
 
@@ -283,12 +317,22 @@ private fun ContainerRow(c: Container) {
                 Text(c.name, style = T.item, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(containerMeta(c), style = T.mono, maxLines = 1)
             }
+            if (open == null && Favorites.has(context, c.uri)) {
+                QsIcon(R.drawable.ic_finger, Qs.brass, 18.dp, description = "تُفتح بالبصمة")
+                Spacer(Modifier.width(4.dp))
+            }
             QsIcon(if (open != null) R.drawable.ic_unlock else R.drawable.ic_lock, if (open != null) Qs.mint else Qs.muted, 18.dp)
             Spacer(Modifier.width(6.dp))
             IconBtn(R.drawable.ic_more, "خيارات", tint = Qs.muted) { menu = true }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(Qs.line).align(Alignment.BottomCenter))
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }, containerColor = Qs.surface) {
+            if (Favorites.has(context, c.uri)) {
+                DropdownMenuItem(text = { Text("إلغاء الفتح بالبصمة", style = T.item) }, onClick = {
+                    menu = false
+                    Favorites.forget(context, c.uri)
+                })
+            }
             DropdownMenuItem(text = { Text("إزالة من القائمة", style = T.item) }, onClick = {
                 menu = false
                 confirmRemove = true
@@ -303,6 +347,7 @@ private fun ContainerRow(c: Container) {
             onConfirm = {
                 confirmRemove = false
                 AppState.sessionFor(c)?.let { AppState.closeSession(it.handle) }
+                Favorites.forget(context, c.uri)
                 AppState.removeContainer(c)
                 Saf.release(context, Uri.parse(c.uri))
             },

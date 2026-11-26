@@ -102,10 +102,15 @@ jobs:
           QS_KEY_PASSWORD: ${{ secrets.QS_KEY_PASSWORD }}
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Collect APK
+      - name: Collect APKs
         run: |
           mkdir -p dist
-          cp android/app/build/outputs/apk/release/app-release.apk "dist/QsCrypt-1.0.${GITHUB_RUN_NUMBER}.apk"
+          out=android/app/build/outputs/apk/release
+          ls -la "$out"
+          v="1.0.${GITHUB_RUN_NUMBER}"
+          cp "$out/app-arm64-v8a-release.apk" "dist/QsCrypt-$v-modern-arm64.apk"
+          cp "$out/app-armeabi-v7a-release.apk" "dist/QsCrypt-$v-old-phones-armv7.apk"
+          cp "$out/app-universal-release.apk" "dist/QsCrypt-$v-universal.apk"
           cd dist && sha256sum *.apk | tee SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
@@ -132,4 +137,9 @@ jobs:
           files: dist/*
           body: |
             الإصدار الأول، مبني تلقائياً من `main` (commit ${{ github.sha }}).
-            نزّل ملف الـ APK وركّبه على الجوال. بصمة الملف (SHA-256) في `SHA256SUMS.txt`.
+
+            - `modern-arm64`: للهواتف الحديثة (64-بت، أندرويد 7 فأحدث). الأصغر والأسرع.
+            - `old-phones-armv7`: للهواتف القديمة (32-بت، أندرويد 7 فأحدث).
+            - `universal`: يعمل على كل الهواتف، إن لم تعرف أيّهما تختار.
+
+            بصمات الملفات (SHA-256) في `SHA256SUMS.txt`.

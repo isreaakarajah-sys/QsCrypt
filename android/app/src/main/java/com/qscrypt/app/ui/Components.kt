@@ -284,6 +284,28 @@ fun QsField(
 }
 
 /** Small selectable pill used for options. */
+/** A small outlined action: pause, resume, cancel, paste… */
+@Composable
+fun Pill(text: String, color: Color, enabled: Boolean = true, @DrawableRes icon: Int? = null, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(17.dp)
+    Row(
+        Modifier
+            .height(34.dp)
+            .clip(shape)
+            .border(1.dp, color.copy(alpha = 0.7f), shape)
+            .clickable(enabled = enabled, onClick = onClick)
+            .alpha(if (enabled) 1f else 0.4f)
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (icon != null) {
+            QsIcon(icon, color, 16.dp)
+            Spacer(Modifier.width(6.dp))
+        }
+        Text(text, style = T.label.copy(color = color), maxLines = 1)
+    }
+}
+
 @Composable
 fun Chip(text: String, selected: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
     val shape = RoundedCornerShape(18.dp)

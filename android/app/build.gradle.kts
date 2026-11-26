@@ -18,8 +18,17 @@ android {
         targetSdk = 35
         versionCode = buildNumber
         versionName = "1.0.$buildNumber"
-        ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+    }
+
+    // One APK per phone generation, plus one that runs everywhere:
+    // arm64-v8a for phones of the last ~8 years, armeabi-v7a for older
+    // 32-bit phones, and a universal APK with every engine build.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = true
         }
     }
 

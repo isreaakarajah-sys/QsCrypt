@@ -35,7 +35,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.widget.Toast
 import com.qscrypt.app.AppState
+import com.qscrypt.app.Call
+import com.qscrypt.app.Jobs
+import com.qscrypt.app.QsCore
+import com.qscrypt.app.Reply
+import com.qscrypt.app.Session
+import com.qscrypt.app.VolumeInfo
 import com.qscrypt.app.R
 import com.qscrypt.app.Screen
 import com.qscrypt.app.UsbDrives
@@ -118,8 +125,14 @@ fun DrivesScreen() {
                             }
                             if (session != null) {
                                 if (session.info.optBoolean("writeProtected")) Tag("للقراءة فقط", TagKind.Outline)
-                                IconBtn(R.drawable.ic_close, "فصل", tint = Qs.muted) {
-                                    UsbDrives.close(session)
+                                Pill("إخراج آمن", Qs.brass, icon = R.drawable.ic_usb) {
+                                    val busy = AppState.sessions.filter { it.usb?.handle == session.handle }.any { Jobs.busy(it.handle) }
+                                    if (busy) {
+                                        message = "تعمل عملية في الخلفية على هذا القرص. أوقفها من «العمليات في الخلفية» أو أغلق الخزنة أولاً."
+                                    } else {
+                                        UsbDrives.close(session)
+                                        Toast.makeText(context, "أُغلق القرص بأمان. يمكنك نزعه الآن.", Toast.LENGTH_LONG).show()
+                                    }
                                 }
                             }
                         }
@@ -130,7 +143,24 @@ fun DrivesScreen() {
                                     TargetRow(t, onOpen = {
                                         val c = UsbDrives.container(session, t)
                                         val open = AppState.sessionFor(c)
-                                        if (open != null) AppState.push(Screen.Vault(open.handle)) else AppState.push(Screen.Unlock(c, t))
+                                        when {
+                                            open != null -> AppState.push(Screen.Vault(open.handle))
+                                            // An ordinary (unencrypted) partition opens as it is, to copy files to and from vaults.
+                                            t.kind in setOf("fat", "exfat", "ntfs") -> scope.launch {
+                                                val r = withContext(Dispatchers.IO) {
+                                                    Call("volume.openPlain").srcUsb(t).put("readOnly", session.info.optBoolean("writeProtected")).put("tz", tzMinutes()).run()
+                                                }
+                                                if (!r.ok) {
+                                                    message = "تعذّر فتح القسم: ${r.error}"
+                                                } else {
+                                                    val h = r.json.optLong("handle")
+                                                    val info = Reply(withContext(Dispatchers.IO) { QsCore.volumeInfo(h) })
+                                                    AppState.opened(Session(h, c, VolumeInfo.from(if (info.ok) info.json else r.json), System.currentTimeMillis(), t))
+                                                    AppState.push(Screen.Vault(h))
+                                                }
+                                            }
+                                            else -> AppState.push(Screen.Unlock(c, t))
+                                        }
                                     }, onEncrypt = {
                                         if (session.info.optBoolean("writeProtected")) message = "هذا القرص محمي من الكتابة."
                                         else encrypt = t
@@ -159,7 +189,7 @@ fun DrivesScreen() {
                 Gap(12.dp)
             }
             Gap(6.dp)
-            Note("يتعامل QsCrypt مع القرص مباشرة (USB Mass Storage)، فيفتح أقراص VeraCrypt وBitLocker وQsCrypt التي لا يقرؤها أندرويد، دون روت. أثناء اتصاله هنا لا يراه أندرويد، فافصله من هنا قبل نزعه.", icon = R.drawable.ic_info)
+            Note("يتعامل QsCrypt مع القرص مباشرة (USB Mass Storage)، فيفتح أقراص VeraCrypt وBitLocker وQsCrypt التي لا يقرؤها أندرويد، دون روت، وأقسامها العادية أيضاً لتنسخ بينها وبين خزناتك. أثناء اتصاله هنا لا يراه أندرويد، فاضغط «إخراج آمن» قبل نزعه.", icon = R.drawable.ic_info)
             Gap(10.dp)
             Note("الحاويات المحفوظة كملفات على فلاشة تُفتح من «خزناتي» ← «افتح حاوية».", icon = R.drawable.ic_folder)
             Gap(24.dp)

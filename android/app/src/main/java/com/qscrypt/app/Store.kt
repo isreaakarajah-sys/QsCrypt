@@ -175,6 +175,11 @@ object Prefs {
         set(v) = sp.edit().putBoolean("open_notice", v).apply()
 
     /** Background operations pause when the battery is low and the phone is not charging. */
+    /** Vault folders as a grid of thumbnails rather than a list. */
+    var gridView: Boolean
+        get() = sp.getBoolean("grid_view", false)
+        set(v) = sp.edit().putBoolean("grid_view", v).apply()
+
     var notificationsAsked: Boolean
         get() = sp.getBoolean("notif_asked", false)
         set(v) = sp.edit().putBoolean("notif_asked", v).apply()

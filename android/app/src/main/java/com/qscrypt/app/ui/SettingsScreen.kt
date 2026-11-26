@@ -28,6 +28,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,6 +48,10 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.fragment.app.FragmentActivity
 import com.qscrypt.app.AppState
+import com.qscrypt.app.Jobs
+import com.qscrypt.app.SECRET_NONE
+import com.qscrypt.app.SECRET_PATTERN
+import com.qscrypt.app.SECRET_PIN
 import com.qscrypt.app.PhoneAuth
 import com.qscrypt.app.Prefs
 import com.qscrypt.app.QsCore
@@ -125,26 +130,72 @@ private fun SettingRow(icon: Int, title: String, subtitle: String? = null, onCli
 }
 
 private val AUTOLOCK = listOf(0L to "فوراً", 30_000L to "30 ثانية", 60_000L to "دقيقة", 300_000L to "5 دقائق")
+private val IDLE = listOf(0 to "أبداً", 5 to "5 دقائق", 15 to "15 دقيقة", 60 to "ساعة")
 
+@Composable
+private fun ChoiceBlock(icon: Int, title: String, subtitle: String, content: @Composable () -> Unit) {
+    Column(Modifier.padding(vertical = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Tile(icon, Qs.brass, size = 38.dp, radius = 12.dp, iconSize = 19.dp)
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text(title, style = T.item)
+                Text(subtitle, style = T.small)
+            }
+        }
+        Gap(10.dp)
+        content()
+    }
+}
+
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var autoLock by remember { mutableLongStateOf(Prefs.autoLockMs) }
     var closeOnLock by remember { mutableStateOf(Prefs.closeVaultsOnLock) }
-    var askOldPin by remember { mutableStateOf(false) }
-    var settingPin by remember { mutableStateOf(false) }
-    var soon by remember { mutableStateOf<String?>(null) }
+    var screenOff by remember { mutableStateOf(Prefs.closeOnScreenOff) }
+    var idle by remember { mutableIntStateOf(Prefs.idleCloseMinutes) }
+    var notice by remember { mutableStateOf(Prefs.openVaultsNotice) }
+    var battery by remember { mutableStateOf(Prefs.pauseOnLowBattery) }
     var testing by remember { mutableStateOf(false) }
     var lockMode by remember { mutableStateOf(PhoneAuth.mode(context)) }
+    var secret by remember { mutableIntStateOf(Prefs.secretKind) }
     var disguised by remember { mutableStateOf(Prefs.disguised) }
     var askDisguise by remember { mutableStateOf(false) }
     val phoneAuth = remember { PhoneAuth.available(context) }
+    // Changing the app lock: verify the current one, then set up the new one.
+    var verifyFor by remember { mutableIntStateOf(-1) }
+    var setting by remember { mutableIntStateOf(-1) }
     val test = AppState.selfTest
+    val attempts = remember { Prefs.attemptsLog().count { it.time > Prefs.attemptsSeen } }
 
-    if (settingPin) {
-        PinSetupScreen(onDone = { settingPin = false; Toast.makeText(context, "تم تغيير الرمز", Toast.LENGTH_SHORT).show() })
-        return
+    fun refreshLock() {
+        secret = Prefs.secretKind
+        lockMode = PhoneAuth.mode(context)
+        disguised = Prefs.disguised
+    }
+
+    when (setting) {
+        SECRET_PIN -> {
+            PinSetupScreen(onDone = {
+                setting = -1
+                if (lockMode == PhoneAuth.Mode.PhoneOnly) Prefs.lockMode = PhoneAuth.Mode.Either.id
+                refreshLock()
+                Toast.makeText(context, "تم حفظ الرمز", Toast.LENGTH_SHORT).show()
+            })
+            return
+        }
+        SECRET_PATTERN -> {
+            PatternSetupScreen(onDone = {
+                setting = -1
+                if (lockMode == PhoneAuth.Mode.PhoneOnly) Prefs.lockMode = PhoneAuth.Mode.Either.id
+                refreshLock()
+                Toast.makeText(context, "تم حفظ النمط", Toast.LENGTH_SHORT).show()
+            }, onCancel = { setting = -1 })
+            return
+        }
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -153,19 +204,62 @@ fun SettingsScreen() {
             Row(Modifier.height(48.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("الإعدادات", style = T.display.copy(lineHeight = 36.sp))
             }
-            Section("الأمان") {
-                SettingRow(R.drawable.ic_key, "تغيير الرمز السري", "رمز قفل التطبيق", onClick = { askOldPin = true })
-                SettingRow(R.drawable.ic_lock, "أقفل التطبيق الآن", onClick = { AppState.lock() })
-                Column(Modifier.padding(vertical = 8.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Tile(R.drawable.ic_clock, Qs.brass, size = 38.dp, radius = 12.dp, iconSize = 19.dp)
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text("القفل التلقائي", style = T.item)
-                            Text("بعد مغادرة التطبيق", style = T.small)
-                        }
+            Section("قفل التطبيق") {
+                ChoiceBlock(R.drawable.ic_key, "الرمز الداخلي", when (secret) {
+                    SECRET_PATTERN -> "نمط من النقاط"
+                    SECRET_NONE -> "بلا رمز: البصمة أو الوجه أو قفل الهاتف"
+                    else -> "رمز من 6 أرقام"
+                }) {
+                    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Chip(if (secret == SECRET_PIN) "تغيير الرمز" else "رمز", secret == SECRET_PIN) { verifyFor = SECRET_PIN }
+                        Chip(if (secret == SECRET_PATTERN) "تغيير النمط" else "نمط", secret == SECRET_PATTERN) { verifyFor = SECRET_PATTERN }
+                        Chip("بلا رمز (البصمة فقط)", secret == SECRET_NONE, enabled = phoneAuth && secret != SECRET_NONE) { verifyFor = SECRET_NONE }
                     }
-                    Gap(10.dp)
+                    if (secret == SECRET_NONE) {
+                        Gap(6.dp)
+                        Text("يفتح التطبيق بقفل الهاتف وحده. وضع التمويه يحتاج رمزاً أو نمطاً.", style = T.small)
+                    }
+                }
+                if (secret != SECRET_NONE) {
+                    ChoiceBlock(R.drawable.ic_finger, "قفل الهاتف", if (phoneAuth) "البصمة أو الوجه أو قفل الهاتف" else "لا يوجد قفل شاشة على هذا الهاتف") {
+                        val w = secretWord()
+                        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Chip("$w فقط", lockMode == PhoneAuth.Mode.Pin) {
+                                Prefs.lockMode = PhoneAuth.Mode.Pin.id
+                                lockMode = PhoneAuth.Mode.Pin
+                            }
+                            Chip("$w + قفل الهاتف", lockMode == PhoneAuth.Mode.TwoFactor, enabled = phoneAuth) {
+                                val a = context as? FragmentActivity ?: return@Chip
+                                PhoneAuth.prompt(a, "QsCrypt", "تأكيد قفل الهاتف كخطوة ثانية") { ok, _ ->
+                                    if (ok) {
+                                        Prefs.lockMode = PhoneAuth.Mode.TwoFactor.id
+                                        lockMode = PhoneAuth.Mode.TwoFactor
+                                    }
+                                }
+                            }
+                            Chip("قفل الهاتف أو $w", lockMode == PhoneAuth.Mode.Either, enabled = phoneAuth) {
+                                val a = context as? FragmentActivity ?: return@Chip
+                                PhoneAuth.prompt(a, "QsCrypt", "تأكيد الفتح بقفل الهاتف") { ok, _ ->
+                                    if (ok) {
+                                        Prefs.lockMode = PhoneAuth.Mode.Either.id
+                                        lockMode = PhoneAuth.Mode.Either
+                                    }
+                                }
+                            }
+                        }
+                        Gap(6.dp)
+                        Text(
+                            when (lockMode) {
+                                PhoneAuth.Mode.TwoFactor -> "مصادقة ثنائية: $w ثم بصمتك أو قفل الهاتف. الأقوى."
+                                PhoneAuth.Mode.Either -> "أيّهما شئت: الأسرع، لكن من يعرف قفل هاتفك يفتح التطبيق."
+                                else -> "$w QsCrypt وحده."
+                            },
+                            style = T.small,
+                        )
+                    }
+                }
+                SettingRow(R.drawable.ic_lock, "أقفل التطبيق الآن", onClick = { AppState.lock() })
+                ChoiceBlock(R.drawable.ic_clock, "القفل التلقائي", "بعد مغادرة التطبيق") {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         AUTOLOCK.forEach { (ms, label) ->
                             Chip(label, autoLock == ms) {
@@ -175,66 +269,60 @@ fun SettingsScreen() {
                         }
                     }
                 }
-                SettingRow(R.drawable.ic_vault, "أقفل الخزنات مع التطبيق", "تُغلق كل الخزنات المفتوحة عند القفل") {
-                    QsSwitch(closeOnLock) {
-                        closeOnLock = it
-                        Prefs.closeVaultsOnLock = it
-                    }
-                }
-                Column(Modifier.padding(vertical = 8.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Tile(R.drawable.ic_finger, Qs.brass, size = 38.dp, radius = 12.dp, iconSize = 19.dp)
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text("طريقة فتح التطبيق", style = T.item)
-                            Text(if (phoneAuth) "البصمة أو الوجه أو قفل الهاتف" else "لا يوجد قفل شاشة على هذا الهاتف", style = T.small)
-                        }
-                    }
-                    Gap(10.dp)
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Chip("الرمز فقط", lockMode == PhoneAuth.Mode.Pin) {
-                                Prefs.lockMode = PhoneAuth.Mode.Pin.id
-                                lockMode = PhoneAuth.Mode.Pin
-                            }
-                            Chip("الرمز + قفل الهاتف", lockMode == PhoneAuth.Mode.TwoFactor, enabled = phoneAuth) {
-                                val a = context as? FragmentActivity ?: return@Chip
-                                PhoneAuth.prompt(a, "QsCrypt", "تأكيد قفل الهاتف كخطوة ثانية") { ok, _ ->
-                                    if (ok) {
-                                        Prefs.lockMode = PhoneAuth.Mode.TwoFactor.id
-                                        lockMode = PhoneAuth.Mode.TwoFactor
-                                    }
-                                }
-                            }
-                        }
-                        Chip("قفل الهاتف أو الرمز", lockMode == PhoneAuth.Mode.Either, enabled = phoneAuth) {
-                            val a = context as? FragmentActivity ?: return@Chip
-                            PhoneAuth.prompt(a, "QsCrypt", "تأكيد الفتح بقفل الهاتف") { ok, _ ->
-                                if (ok) {
-                                    Prefs.lockMode = PhoneAuth.Mode.Either.id
-                                    lockMode = PhoneAuth.Mode.Either
-                                }
-                            }
-                        }
-                    }
-                    Gap(6.dp)
-                    Text(
-                        when (lockMode) {
-                            PhoneAuth.Mode.TwoFactor -> "مصادقة ثنائية: الرمز السري ثم بصمتك أو قفل الهاتف. الأقوى."
-                            PhoneAuth.Mode.Either -> "أيّهما شئت: الأسرع، لكن من يعرف قفل هاتفك يفتح التطبيق."
-                            else -> "رمز QsCrypt المكوّن من 6 أرقام وحده."
-                        },
-                        style = T.small,
-                    )
-                }
-                SettingRow(R.drawable.ic_sliders, "وضع التمويه", "يظهر التطبيق كآلة حاسبة تعمل") {
-                    QsSwitch(disguised) { on ->
+                SettingRow(R.drawable.ic_sliders, "وضع التمويه", if (secret == SECRET_NONE) "يحتاج رمزاً أو نمطاً" else "يظهر التطبيق كآلة حاسبة تعمل") {
+                    QsSwitch(disguised, enabled = secret != SECRET_NONE || disguised) { on ->
                         if (on) {
                             askDisguise = true
                         } else if (Disguise.apply(context, false)) {
                             disguised = false
                             Toast.makeText(context, "عادت أيقونة QsCrypt. قد يستغرق ظهورها دقيقة.", Toast.LENGTH_LONG).show()
                         }
+                    }
+                }
+                SettingRow(R.drawable.ic_alert, "سجل المحاولات الفاشلة", if (attempts > 0) "$attempts جديدة" else "كل رمز أو كلمة مرور خاطئة", onClick = { AppState.push(Screen.Attempts) }) {
+                    if (attempts > 0) Tag("$attempts", TagKind.Coral)
+                }
+            }
+            Section("إغلاق الخزنات") {
+                SettingRow(R.drawable.ic_vault, "مع قفل التطبيق", "تُغلق الخزنات المفتوحة عند القفل") {
+                    QsSwitch(closeOnLock) {
+                        closeOnLock = it
+                        Prefs.closeVaultsOnLock = it
+                    }
+                }
+                SettingRow(R.drawable.ic_lock, "عند إطفاء الشاشة", "تُغلق كلها ويُقفل التطبيق فور إطفاء الشاشة") {
+                    QsSwitch(screenOff) {
+                        screenOff = it
+                        Prefs.closeOnScreenOff = it
+                    }
+                }
+                ChoiceBlock(R.drawable.ic_clock, "عند عدم الاستخدام", "تُغلق بعد مدة بلا لمس، حتى والتطبيق مفتوح") {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        IDLE.forEach { (m, label) ->
+                            Chip(label, idle == m) {
+                                idle = m
+                                Prefs.idleCloseMinutes = m
+                            }
+                        }
+                    }
+                }
+                SettingRow(R.drawable.ic_unlock, "تنبيه «خزنات مفتوحة»", "إشعار فيه «أقفل الكل» حين تغادر التطبيق والخزنات مفتوحة (لا يظهر في وضع التمويه)") {
+                    QsSwitch(notice) {
+                        notice = it
+                        Prefs.openVaultsNotice = it
+                    }
+                }
+                Text("الخزنة التي تعمل عليها عملية في الخلفية تبقى مفتوحة حتى تنتهي، ثم تُغلق. «أقفل الكل» يوقفها ويغلق فوراً. يمكنك أيضاً إضافة زر «أقفل الخزنات» إلى الإعدادات السريعة في هاتفك.", style = T.small, modifier = Modifier.padding(vertical = 8.dp))
+            }
+            Section("العمليات في الخلفية") {
+                SettingRow(R.drawable.ic_archive, "العمليات", "النسخ والإضافة والتصدير والتشفير وملء الفراغ", onClick = { AppState.push(Screen.JobsList) }) {
+                    val n = Jobs.list.count { it.active }
+                    if (n > 0) Tag("$n", TagKind.Brass)
+                }
+                SettingRow(R.drawable.ic_clock, "إيقاف مؤقت عند ضعف البطارية", "تحت 15% ودون شحن، وتُستأنف عند الشحن") {
+                    QsSwitch(battery) {
+                        battery = it
+                        Prefs.pauseOnLowBattery = it
                     }
                 }
             }
@@ -275,6 +363,7 @@ fun SettingsScreen() {
                         Text("المحرك ${test.engine} – ${test.backend}", style = T.mono)
                     }
                 }
+                SettingRow(R.drawable.ic_clock, "اختبار السرعة", "سرعة كل خوارزمية على هذا الهاتف", onClick = { AppState.push(Screen.Bench) })
             }
             Section("التطبيق") {
                 SettingRow(R.drawable.ic_share, "شارك التطبيق", "أرسله لصديق عبر البلوتوث أو المشاركة القريبة", onClick = { shareApk(context) })
@@ -285,45 +374,38 @@ fun SettingsScreen() {
         BottomNav(Screen.Settings)
     }
 
-    if (askOldPin) {
-        var pin by remember { mutableStateOf("") }
-        var wrong by remember { mutableStateOf(false) }
-        AlertDialog(
-            onDismissRequest = { askOldPin = false },
-            containerColor = Qs.surface,
-            title = { Text("الرمز الحالي", style = T.title) },
-            text = {
-                Column {
-                    QsField(value = pin, onValueChange = { v -> pin = v.filter { it.isDigit() }.take(6); wrong = false }, placeholder = "••••••", password = true, highlighted = true,
-                        keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword)
-                    if (wrong) {
-                        Gap(8.dp)
-                        Text("رمز خاطئ", style = T.small.copy(color = Qs.coral))
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val attempt = pin
-                    scope.launch {
-                        val ok = withContext(Dispatchers.Default) { Prefs.checkPin(attempt) }
-                        if (ok) {
-                            askOldPin = false
-                            settingPin = true
-                        } else {
-                            wrong = true
+    if (verifyFor >= 0) {
+        val target = verifyFor
+        VerifyLockDialog(
+            onVerified = {
+                verifyFor = -1
+                if (target == SECRET_NONE) {
+                    // No internal secret: the phone's lock alone (confirmed once more).
+                    val a = context as? FragmentActivity
+                    if (a != null) {
+                        PhoneAuth.prompt(a, "QsCrypt", "الفتح بقفل الهاتف وحده") { ok, _ ->
+                            if (ok) {
+                                if (Prefs.disguised) Disguise.apply(context, false)
+                                Prefs.clearSecret()
+                                Prefs.lockMode = PhoneAuth.Mode.PhoneOnly.id
+                                refreshLock()
+                                Toast.makeText(context, "يفتح التطبيق الآن بالبصمة أو قفل الهاتف.", Toast.LENGTH_LONG).show()
+                            }
                         }
                     }
-                }, enabled = pin.length == 6) { Text("متابعة", style = T.button.copy(color = Qs.brass, fontSize = 15.sp)) }
+                } else {
+                    setting = target
+                }
             },
-            dismissButton = { TextButton(onClick = { askOldPin = false }) { Text("إلغاء", style = T.button.copy(color = Qs.muted, fontSize = 15.sp)) } },
+            onDismiss = { verifyFor = -1 },
         )
     }
-    soon?.let { s -> QsAlert("قريباً", s, "حسناً", { soon = null }, { soon = null }, dismiss = null) }
     if (askDisguise) {
         QsAlert(
             "وضع التمويه",
-            "ستختفي أيقونة QsCrypt وتظهر مكانها «الآلة الحاسبة»، وهي حاسبة تعمل فعلاً.\n\nلفتح QsCrypt: اكتب رمزك السري (6 أرقام) ثم اضغط «=».\n\nقد يستغرق تغيّر الأيقونة دقيقة، وقد تحتاج لإضافتها إلى الشاشة الرئيسية من جديد. لا تنسَ رمزك: لا يظهر أي شيء آخر يدل على التطبيق.",
+            "ستختفي أيقونة QsCrypt وتظهر مكانها «الآلة الحاسبة»، وهي حاسبة تعمل فعلاً.\n\nلفتح QsCrypt: " +
+                (if (secret == SECRET_PATTERN) "اكتب أرقام نقاط نمطك بالترتيب (1 2 3 في الصف الأعلى، 7 8 9 في الأسفل) ثم اضغط «=»." else "اكتب رمزك السري (6 أرقام) ثم اضغط «=».") +
+                "\n\nقد يستغرق تغيّر الأيقونة دقيقة، وقد تحتاج لإضافتها إلى الشاشة الرئيسية من جديد. في هذا الوضع لا تظهر إشعارات ولا زر المشاركة، فلا شيء يدل على التطبيق.",
             "فعّل التمويه",
             {
                 askDisguise = false
@@ -384,9 +466,15 @@ fun AboutScreen() {
                     "صيغة QsCrypt: AES ثم Twofish ثم XChaCha20-Poly1305 مع Argon2id، وحاويات QsCrypt",
                     "جهات الاتصال برمز QR: تشفير لا يفتحه إلا من تختار (X25519 + ML-KEM-768) وتوقيع Ed25519",
                     "مزايا الحماية: بلا إنترنت، صلاحية زمنية، مرة واحدة، عدد محاولات، كلمة طوارئ، مفتاح استرداد، فتح تلقائي",
-                    "الكتابة على FAT وexFAT، وقراءة NTFS",
-                    "الإخفاء داخل الصور، ووضع التمويه كآلة حاسبة",
-                    "قفل بالرمز ومصادقة ثنائية بقفل الهاتف، ومنع لقطات الشاشة",
+                    "الكتابة على FAT وexFAT، وقراءة NTFS، وفتح الأقسام العادية على الفلاشات",
+                    "عدة خزنات معاً: نسخ ونقل ولصق بينها وبين الجهاز والفلاشة، مجلدات كاملة وتحديد متعدد",
+                    "معرض صور ومشغّل فيديو وصوت وقارئ PDF داخل الخزنة، دون أي نسخة غير مشفّرة على القرص",
+                    "عمليات في الخلفية تُوقف مؤقتاً وتُستأنف، حتى بعد إغلاق التطبيق، وتهيئة سريعة يُملأ فراغها لاحقاً",
+                    "فحص الخزنة وإصلاحها، واختبار السرعة",
+                    "ملف مشفّر يبدو صورة عادية، والإخفاء داخل البكسلات، ورسائل سرية برمز QR",
+                    "إغلاق آمن وإخراج للفلاشة، و«أقفل الكل»، وإغلاق تلقائي عند إطفاء الشاشة أو عدم الاستخدام",
+                    "قفل بالرمز أو النمط أو البصمة وحدها، ومصادقة ثنائية، وفتح الخزنات المفضلة بالبصمة",
+                    "سجل المحاولات الفاشلة، ووضع التمويه كآلة حاسبة، ومنع لقطات الشاشة",
                 ).forEach { Text("•  $it", style = T.body.copy(fontSize = 13.sp, color = Qs.muted)) }
             }
         }

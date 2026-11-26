@@ -16,7 +16,8 @@ fun childOf(dir: String, name: String) = if (dir == "/" || dir.isEmpty()) "/$nam
 
 /** Filling the free space of a quick-formatted volume with encrypted data, resumably. */
 object Fill {
-    private const val STEP = 64L shl 20
+    // Small steps: the vault stays responsive and pausing takes effect within a second or two.
+    private const val STEP = 16L shl 20
 
     /** Whether this volume can be filled (not read-only, not an outer volume with a protected hidden one). */
     fun possible(s: Session): Boolean = !s.info.readOnly && !s.info.protected && !s.plain && s.info.fs != "NTFS"
@@ -26,10 +27,10 @@ object Fill {
     fun running(s: Session): Jobs.Job? = Jobs.list.firstOrNull { it.active && it.kind == "fill" && s.handle in it.vaults }
 
     /** Remembers that the volume needs filling, and starts. */
-    fun schedule(context: Context, s: Session) {
-        if (!possible(s)) return
+    fun schedule(context: Context, s: Session): Jobs.Job? {
+        if (!possible(s)) return null
         if (Prefs.fillCursor(s.stableKey) < 0) Prefs.setFillCursor(s.stableKey, 0)
-        start(context, s)
+        return start(context, s)
     }
 
     /** Continues an unfinished fill when its volume is opened again. */
@@ -72,7 +73,7 @@ object Transfers {
      * same or another vault. Resumable after a restart: files already there
      * with the same size are skipped.
      */
-    fun copy(context: Context, from: Session, dir: String, names: List<String>, to: Session, dest: String, move: Boolean, resume: Boolean = false, uid: String = ""): Jobs.Job {
+    fun copy(context: Context, from: Session, dir: String, names: List<String>, to: Session, dest: String, move: Boolean, resume: Boolean = false, uid: String = "", onEnd: ((Jobs.Job) -> Unit)? = null): Jobs.Job {
         val spec = JSONObject()
             .put("uid", uid.ifEmpty { System.currentTimeMillis().toString() })
             .put("src", from.stableKey).put("srcName", from.container.name).put("dir", dir)
@@ -84,7 +85,7 @@ object Transfers {
         val title = "$verb $what إلى ${to.container.name.substringBeforeLast('.')}"
         val sameVault = from.handle == to.handle
         val spool = context.cacheDir.absolutePath
-        return Jobs.start(context, "copy", title, listOf(from.handle, to.handle).distinct(), spec) work@{
+        return Jobs.start(context, "copy", title, listOf(from.handle, to.handle).distinct(), spec, onEnd) work@{
             // Sizes first, for one progress bar over everything.
             var total = 0L
             val sizes = names.map { n ->

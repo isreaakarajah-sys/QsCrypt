@@ -66,7 +66,7 @@ fun findCard(text: String?): String? = text?.let { CARD.find(it)?.value?.trimEnd
 /** Safety numbers in groups of five digits, as people read them aloud. */
 fun groupedSafety(s: String): String = s.filter { it.isDigit() }.chunked(5).joinToString(" ")
 
-private fun cameraUri(context: Context): Uri {
+fun cameraUri(context: Context): Uri {
     val dir = File(context.cacheDir, "camera").apply { mkdirs() }
     val f = File(dir, "qr.jpg")
     return FileProvider.getUriForFile(context, "${context.packageName}.share", f)
@@ -159,6 +159,18 @@ fun ContactsScreen() {
             Text("جهات الاتصال", style = T.display.copy(lineHeight = 36.sp))
             Gap(4.dp)
             Text("شفّر لأصدقائك ملفات لا يفتحها غيرهم، دون تبادل كلمات مرور", style = T.small)
+            Gap(14.dp)
+            QsCard(onClick = { AppState.push(Screen.Message) }) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Tile(R.drawable.ic_lock, Qs.brass, size = 40.dp, radius = 12.dp, iconSize = 20.dp)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("رسالة سرية برمز QR", style = T.item)
+                        Text("اكتب لصديق، أو اقرأ رسالة وصلتك، بالتصوير فقط", style = T.small)
+                    }
+                    QsIcon(R.drawable.ic_chev, Qs.muted, 18.dp)
+                }
+            }
             Gap(20.dp)
             SectionLabel("هويتي")
             Gap(8.dp)

@@ -36,7 +36,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.widget.Toast
+import androidx.fragment.app.FragmentActivity
 import com.qscrypt.app.AppState
+import com.qscrypt.app.Favorites
+import com.qscrypt.app.PhoneAuth
+import com.qscrypt.app.stableKeyOf
 import com.qscrypt.app.Call
 import com.qscrypt.app.Container
 import com.qscrypt.app.FileKeys
@@ -108,6 +113,14 @@ fun UnlockScreen(container: Container, usb: UsbTarget? = null) {
     var hasRecipients by remember { mutableStateOf(false) }
     val uri = remember(container.uri) { if (usb == null) Uri.parse(container.uri) else null }
     val hasIdentity = remember { Identity.exists(context) }
+    val activity = context as? FragmentActivity
+    // Favourites: the password sealed by a fingerprint-bound hardware key.
+    val favKey = remember(container.uri) { stableKeyOf(container, usb) }
+    val strongFinger = remember { PhoneAuth.strongBiometrics(context) }
+    var favorite by remember { mutableStateOf(Favorites.has(context, favKey)) }
+    var saveFinger by remember { mutableStateOf(false) }
+    var fromFinger by remember { mutableStateOf(false) }
+    var unlockRequested by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(container.uri) {
         val r = withContext(Dispatchers.IO) { withSource(context, container, usb, false) { s -> Call("volume.probe").s().run() } }
@@ -126,6 +139,24 @@ fun UnlockScreen(container: Container, usb: UsbTarget? = null) {
         }
     }
 
+    LaunchedEffect(kind) {
+        if (favorite && kind != Kind.Unknown && activity != null && !busy) {
+            Favorites.open(activity, favKey, container.name) { secret, msg ->
+                if (secret == null) {
+                    favorite = Favorites.has(context, favKey)
+                    if (msg != null && !favorite) error = msg
+                } else {
+                    password = String(secret.password, Charsets.UTF_8)
+                    secret.password.fill(0)
+                    if (secret.pim > 0) pim = secret.pim.toString()
+                    if (kind == Kind.QsCrypt && (secret.unlock == "password" || secret.unlock == "recovery")) qsMode = secret.unlock
+                    fromFinger = true
+                    unlockRequested++
+                }
+            }
+        }
+    }
+
     fun opened(r: Reply) {
         val info = VolumeInfo.from(r.json)
         password = ""
@@ -138,8 +169,17 @@ fun UnlockScreen(container: Container, usb: UsbTarget? = null) {
         } else {
             container.copy(format = info.format, ea = info.ea, fs = info.fs)
         }
-        AppState.sessions.add(Session(info.handle, c, info, System.currentTimeMillis(), usb))
+        AppState.opened(Session(info.handle, c, info, System.currentTimeMillis(), usb))
         AppState.replaceTop(Screen.Vault(info.handle))
+    }
+
+    /** After a successful open with "remember with fingerprint": seal the password. */
+    fun rememberWithFinger(pw: ByteArray, pimValue: Int, mode: String) {
+        val a = activity ?: return
+        Favorites.save(a, favKey, container.name, Favorites.Secret(pw, pimValue, emptyList(), mode)) { err ->
+            pw.fill(0)
+            Toast.makeText(context, err ?: "ستُفتح «${container.name}» بالبصمة من الآن.", Toast.LENGTH_LONG).show()
+        }
     }
 
     suspend fun destroyContainer(): Boolean = withContext(Dispatchers.IO) { destroyQsCrypt(context, container, usb) }
@@ -171,9 +211,28 @@ fun UnlockScreen(container: Container, usb: UsbTarget? = null) {
                 }
             }
             busy = false
+            val usedFinger = fromFinger
+            fromFinger = false
+            if (r != null && !r.ok && r.code == "wrong_password") {
+                Prefs.logAttempt(if (usedFinger) "finger" else "vault", container.name)
+                if (usedFinger) {
+                    // The remembered password no longer opens it (changed elsewhere).
+                    Favorites.forget(context, favKey)
+                    favorite = false
+                    password = ""
+                    error = "كلمة المرور المحفوظة لم تعد تفتح هذه الحاوية، فأُلغي الفتح بالبصمة. أدخل كلمة المرور الحالية."
+                    return@launch
+                }
+            }
             when {
                 r == null -> error = "تعذّر الوصول إلى الملف. ربما نُقل أو حُذف، أو أن الفلاشة غير متصلة."
-                r.ok -> opened(r)
+                r.ok -> {
+                    val keep = if (saveFinger && !usedFinger) password.toByteArray(Charsets.UTF_8) else null
+                    val keepPim = pim.toIntOrNull() ?: 0
+                    val mode = if (kind == Kind.QsCrypt) qsMode else "password"
+                    opened(r)
+                    if (keep != null) rememberWithFinger(keep, keepPim, mode)
+                }
                 r.code == "policy" -> {
                     val destroyed = r.json.optString("action") == "destroy"
                     if (destroyed) destroyContainer()
@@ -199,6 +258,8 @@ fun UnlockScreen(container: Container, usb: UsbTarget? = null) {
             }
         }
     }
+
+    LaunchedEffect(unlockRequested) { if (unlockRequested > 0) unlock() }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
         Gap(20.dp)
@@ -231,6 +292,26 @@ fun UnlockScreen(container: Container, usb: UsbTarget? = null) {
             },
         )
         Gap(22.dp)
+        if (favorite && activity != null) {
+            PrimaryButton("افتح بالبصمة", icon = R.drawable.ic_finger, enabled = !busy) {
+                Favorites.open(activity, favKey, container.name) { secret, msg ->
+                    if (secret == null) {
+                        if (msg != null) error = msg
+                        favorite = Favorites.has(context, favKey)
+                    } else {
+                        password = String(secret.password, Charsets.UTF_8)
+                        secret.password.fill(0)
+                        if (secret.pim > 0) pim = secret.pim.toString()
+                        if (kind == Kind.QsCrypt && (secret.unlock == "password" || secret.unlock == "recovery")) qsMode = secret.unlock
+                        fromFinger = true
+                        unlock()
+                    }
+                }
+            }
+            Gap(10.dp)
+            Text("أو أدخل كلمة المرور:", style = T.small)
+            Gap(12.dp)
+        }
         if (kind == Kind.QsCrypt) {
             Text("طريقة الفتح", style = T.label)
             Gap(8.dp)
@@ -267,6 +348,11 @@ fun UnlockScreen(container: Container, usb: UsbTarget? = null) {
                 QsField(value = pim, onValueChange = { v -> pim = v.filter { it.isDigit() }.take(7) }, placeholder = "—", keyboardType = KeyboardType.NumberPassword, height = 40.dp, modifier = Modifier.width(92.dp), textStyle = T.monoLarge)
             }
             KeyfilesRow(keyfiles)
+        }
+        if (strongFinger && !favorite && needsSecret && activity != null) {
+            OptionRow(R.drawable.ic_finger, "تذكّرها للفتح بالبصمة", "تُحفظ كلمة المرور مشفّرة بمفتاح في عتاد الهاتف لا يعمل إلا ببصمتك") {
+                QsSwitch(saveFinger, enabled = keyfiles.isEmpty() && !protect) { saveFinger = it }
+            }
         }
         OptionRow(R.drawable.ic_eye, "فتح للقراءة فقط", "لا يمكن تعديل أي ملف داخل الحاوية") { QsSwitch(readOnly) { readOnly = it } }
         if (kind == Kind.VeraCrypt || kind == Kind.Unknown) {
@@ -325,7 +411,7 @@ fun UnlockScreen(container: Container, usb: UsbTarget? = null) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
             QsIcon(R.drawable.ic_lock, Qs.muted, 14.dp)
             Spacer(Modifier.width(6.dp))
-            Text("كلمة المرور لا تُحفظ ولا تغادر جهازك", style = T.small, textAlign = TextAlign.Center)
+            Text(if (favorite || saveFinger) "كلمة المرور تُحفظ مشفّرة بالبصمة ولا تغادر جهازك" else "كلمة المرور لا تُحفظ ولا تغادر جهازك", style = T.small, textAlign = TextAlign.Center)
         }
         Gap(24.dp)
     }

@@ -44,11 +44,11 @@ data class Session(val handle: Long, val container: Container, val info: VolumeI
     val plain: Boolean get() = info.format == "Plain"
 
     /** The same for every opening of this container (USB handles change with each connection). */
-    val stableKey: String get() = stableKey(container, usb)
+    val stableKey: String get() = stableKeyOf(container, usb)
 }
 
 /** A key for favourites and resumable jobs that survives reconnecting a USB drive. */
-fun stableKey(container: Container, usb: UsbTarget?): String {
+fun stableKeyOf(container: Container, usb: UsbTarget?): String {
     if (usb == null) return container.uri
     val drive = UsbDrives.sessions.firstOrNull { it.handle == usb.handle }?.info
     val id = listOf(drive?.optString("vendor").orEmpty().trim(), drive?.optString("product").orEmpty().trim(), drive?.optLong("size")?.toString().orEmpty()).joinToString("|")
@@ -71,6 +71,8 @@ object AppState {
     var clip by mutableStateOf<Clip?>(null)
     /** Documents shared to the app, waiting for a destination. */
     var shared by mutableStateOf<List<Uri>>(emptyList())
+    /** Shared documents handed to the QsCrypt encryption screen. */
+    var encryptShared: List<Uri> = emptyList()
     /** Failed attempts since the last unlock, to report once the app is open. */
     var attemptsToReport by mutableStateOf(0)
     /** Asks for the notification permission (Android 13+), set by the activity. */
@@ -181,6 +183,24 @@ object AppState {
             stack.removeAll { it is Screen.Unlock }
             if (stack.isEmpty()) stack.add(Screen.Home)
         }
+    }
+
+    /**
+     * Closes one vault from its screen. On a USB drive, the drive is released
+     * too once no vault on it is open, so it can be pulled out.
+     */
+    fun safeClose(context: Context, s: Session) {
+        closeSession(s.handle)
+        var text = "أُغلقت «${s.container.name.substringBeforeLast('.').ifBlank { s.container.name }}» بأمان"
+        val usb = s.usb
+        if (usb != null) {
+            val drive = UsbDrives.sessions.firstOrNull { it.handle == usb.handle }
+            if (drive != null && sessions.none { it.usb?.handle == usb.handle }) {
+                UsbDrives.close(drive)
+                text = "أُغلقت الخزنة وفُصل القرص بأمان. يمكنك نزعه الآن."
+            }
+        }
+        runCatching { Toast.makeText(context, text, Toast.LENGTH_LONG).show() }
     }
 
     /** "Lock all": cancel what runs on the vaults, close them all, lock the app. */
