@@ -206,7 +206,7 @@ object AppState {
     /** "Lock all": cancel what runs on the vaults, close them all, lock the app. */
     fun lockAll(context: Context, from: String) {
         init(context)
-        Jobs.list.filter { it.active && it.vaults.isNotEmpty() }.forEach { it.cancel() }
+        Jobs.list.filter { it.active && it.vaults.isNotEmpty() }.forEach { it.interrupt() }
         val n = sessions.size
         closeAll(keepBusy = false)
         UsbDrives.sessions.toList().forEach { UsbDrives.close(it) }
@@ -249,7 +249,12 @@ object AppState {
         }
         locked = true
         pinPassed = false
-        if (force || Prefs.closeVaultsOnLock) closeAll(keepBusy = !force)
+        if (force || Prefs.closeVaultsOnLock) {
+            // A job the user paused would keep its vault open indefinitely: stop it
+            // (copies and the free-space fill resume later); running jobs finish first.
+            Jobs.list.filter { it.active && it.pauseFlag.get() && it.vaults.isNotEmpty() }.forEach { it.interrupt() }
+            closeAll(keepBusy = !force)
+        }
     }
 
     /** The user touched the app. */

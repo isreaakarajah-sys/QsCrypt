@@ -113,7 +113,11 @@ private fun ZoomablePicture(handle: Long, path: String, size: Long, name: String
     val img by produceState<Any?>(null, path) {
         value = withContext(Dispatchers.IO) {
             if (size > MAX_PICTURE) return@withContext "الصورة أكبر من أن تُعرض هنا (${humanSize(size)})."
-            val bytes = QsCore.readFile(handle, path, MAX_PICTURE) ?: return@withContext "تعذّرت قراءة الصورة."
+            val bytes = try {
+                QsCore.readFile(handle, path, MAX_PICTURE)
+            } catch (e: OutOfMemoryError) {
+                return@withContext "الصورة كبيرة على ذاكرة الجهاز."
+            } ?: return@withContext "تعذّرت قراءة الصورة."
             try {
                 decodePicture(bytes, 2560)?.asImageBitmap() ?: "تعذّر عرض الصورة. قد تكون بصيغة غير مدعومة على هذا الجهاز."
             } catch (e: OutOfMemoryError) {

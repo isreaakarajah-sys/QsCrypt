@@ -62,21 +62,34 @@ object Thumbs {
 
     fun cached(handle: Long, path: String): ImageBitmap? = cache.get("$handle:$path")
 
+    /** Two pictures at a time: a folder of large photos must not fill the memory. */
+    private val gate = java.util.concurrent.Semaphore(2)
+
     /** Reads and shrinks a picture (on a background thread). */
     fun load(handle: Long, path: String, size: Long, side: Int = 320): ImageBitmap? {
         cached(handle, path)?.let { return it }
         if (size <= 0 || size > MAX_SOURCE) return null
-        val bytes = QsCore.readFile(handle, path, MAX_SOURCE) ?: return null
-        val bmp = try {
-            decodePicture(bytes, side)
-        } catch (e: OutOfMemoryError) {
-            null
+        gate.acquire()
+        try {
+            cached(handle, path)?.let { return it }
+            val bytes = try {
+                QsCore.readFile(handle, path, MAX_SOURCE)
+            } catch (e: OutOfMemoryError) {
+                null
+            } ?: return null
+            val bmp = try {
+                decodePicture(bytes, side)
+            } catch (e: OutOfMemoryError) {
+                null
+            } finally {
+                bytes.fill(0)
+            }
+            val img = bmp?.asImageBitmap() ?: return null
+            cache.put("$handle:$path", img)
+            return img
         } finally {
-            bytes.fill(0)
+            gate.release()
         }
-        val img = bmp?.asImageBitmap() ?: return null
-        cache.put("$handle:$path", img)
-        return img
     }
 
     fun forget(handle: Long) {

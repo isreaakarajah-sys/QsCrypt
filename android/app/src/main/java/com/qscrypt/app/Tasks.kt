@@ -86,17 +86,24 @@ object Transfers {
         val sameVault = from.handle == to.handle
         val spool = context.cacheDir.absolutePath
         return Jobs.start(context, "copy", title, listOf(from.handle, to.handle).distinct(), spec, onEnd) work@{
-            // Sizes first, for one progress bar over everything.
+            // Sizes first, for one progress bar over everything. When resuming a
+            // move, items already moved (gone from the source) are done.
             var total = 0L
-            val sizes = names.map { n ->
+            val todo = mutableListOf<String>()
+            val sizes = mutableListOf<Long>()
+            for (n in names) {
                 val r = Call("fs.tree").put("handle", from.handle).put("path", childOf(dir, n)).run()
-                if (!r.ok) return@work r
-                r.json.optLong("total").also { total += it }
+                if (!r.ok) {
+                    if (resume && move && r.code == "not_found") continue
+                    return@work r
+                }
+                todo += n
+                sizes += r.json.optLong("total").also { total += it }
             }
             job.total = total
             var base = 0L
             var copied = 0
-            for ((i, n) in names.withIndex()) {
+            for ((i, n) in todo.withIndex()) {
                 if (!checkpoint()) return@work fail("cancelled")
                 detail(n)
                 val src = childOf(dir, n)

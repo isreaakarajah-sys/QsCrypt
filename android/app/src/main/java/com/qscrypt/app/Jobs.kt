@@ -74,6 +74,15 @@ object Jobs {
             cancelFlag.set(true)
             pauseFlag.set(false)
         }
+
+        /** Stopped because its vault closed or the app locked: a copy stays resumable. */
+        var interrupted = false
+            private set
+
+        fun interrupt() {
+            interrupted = true
+            cancel()
+        }
     }
 
     /** What a job's work sees: progress reporting with pause and cancel. */
@@ -166,7 +175,7 @@ object Jobs {
 
     fun busy(handle: Long): Boolean = list.any { it.active && handle in it.vaults }
 
-    fun cancelFor(handle: Long) = list.filter { it.active && handle in it.vaults }.forEach { it.cancel() }
+    fun cancelFor(handle: Long) = list.filter { it.active && handle in it.vaults }.forEach { it.interrupt() }
 
     /**
      * Queues `work`. `vaults` are the handles it uses (they stay open while it
@@ -210,6 +219,11 @@ object Jobs {
             }
             if (!r.ok && job.state == State.Failed) job.result = r.error
             if (r.ok && job.result.isEmpty()) job.result = r.json.optString("summary")
+            val spec = job.spec
+            if (job.state == State.Cancelled && job.interrupted && spec != null) {
+                job.result = "توقفت لإغلاق الخزنة؛ يمكن استئنافها لاحقاً."
+                withContext(Dispatchers.Main) { pending.add(Pending("j${job.id}-${spec.optString("uid")}", job.kind, job.title, spec)) }
+            }
             save()
             changed(context)
             withContext(Dispatchers.Main) {
