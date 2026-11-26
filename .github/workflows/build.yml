@@ -53,6 +53,11 @@ jobs:
         working-directory: android
         run: ./gradlew :app:compileReleaseKotlin --no-daemon --stacktrace
 
+      # Calls to Android APIs newer than the oldest supported phone must be guarded.
+      - name: Check API levels (lint NewApi)
+        working-directory: android
+        run: ./gradlew :app:lintRelease --no-daemon
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android

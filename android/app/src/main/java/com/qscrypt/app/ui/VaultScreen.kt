@@ -259,8 +259,6 @@ fun VaultScreen(handle: Long, path: String) {
         }
     }
 
-    fun open(e: Entry) = openAt(path, e)
-
     fun openAt(dir: String, e: Entry) {
         val p = childPath(dir, e.name)
         when {
@@ -272,6 +270,8 @@ fun VaultScreen(handle: Long, path: String) {
             else -> cannotView = e
         }
     }
+
+    fun open(e: Entry) = openAt(path, e)
 
     fun toggle(e: Entry) {
         selected = if (e.name in selected) selected - e.name else selected + e.name

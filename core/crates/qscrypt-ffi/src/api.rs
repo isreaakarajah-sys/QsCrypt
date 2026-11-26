@@ -358,9 +358,15 @@ pub fn sniff(fd: i32) -> String {
     })())
 }
 
-/// Decrypts an asset sealed with the activation password; None if wrong.
+/// Decrypts an asset sealed with the activation password and this build's
+/// pepper (see `pepper.rs`); None if wrong.
 pub fn open_asset(data: &[u8], password: &[u8]) -> Option<Vec<u8>> {
-    qsc::open_asset(backend(), password, data).ok()
+    let mut input = Vec::with_capacity(password.len() + 32);
+    input.extend_from_slice(password);
+    input.extend_from_slice(&crate::pepper::get());
+    let r = qsc::open_asset(backend(), &input, data).ok();
+    qscrypt_core::util::wipe(&mut input);
+    r
 }
 
 pub fn pin_hash(pin: &[u8], salt: &[u8]) -> Option<Vec<u8>> {
@@ -384,6 +390,17 @@ mod tests {
         let mut p = std::env::temp_dir();
         p.push(format!("qscrypt-ffi-{}-{name}", std::process::id()));
         p
+    }
+
+    #[test]
+    fn assets_need_the_password_and_the_pepper() {
+        // Sealed by android/tools/seal_assets.py with "TEST" and the unpatched pepper.
+        if backend().name().contains("fake") {
+            return;
+        }
+        let blob: Vec<u8> = (0..95).map(|i| u8::from_str_radix(&"5153415353455431400000000100000001000000bdb13578a428a3c61f8164185c4c0caa131b6c2422dd193caa2a911751a66f81f69a0a75ad0af1afc3cc5052380416df54b96c932637dc3b6e87c63b8c8364247eb8dd5573c9a458354d9a"[2 * i..2 * i + 2], 16).unwrap()).collect();
+        assert_eq!(open_asset(&blob, b"TEST").as_deref(), Some(&b"QsCrypt pepper test"[..]));
+        assert!(open_asset(&blob, b"TESX").is_none());
     }
 
     #[test]

@@ -9,6 +9,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -38,6 +39,7 @@ import com.qscrypt.app.humanSize
 import java.io.File
 
 /** Settings → diagnostic log: read it, send it to the developer, save it, clear it. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DiagScreen() {
     val context = LocalContext.current

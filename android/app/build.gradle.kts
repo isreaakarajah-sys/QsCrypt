@@ -14,6 +14,7 @@ android {
 
     defaultConfig {
         applicationId = "com.qscrypt.app"
+        // Android 7.0 and later (APK signature scheme v2 only, no JAR signing).
         minSdk = 24
         targetSdk = 35
         versionCode = buildNumber
@@ -65,9 +66,12 @@ android {
         compose = true
     }
     lint {
-        // The engine's JNI names and Arabic-only strings trip checks that do not apply here.
+        // Only what would crash an older phone is checked (CI runs it), and it must pass.
+        checkOnly += "NewApi"
         checkReleaseBuilds = false
-        abortOnError = false
+        abortOnError = true
+        textReport = true
+        textOutput = file("stdout")
     }
     packaging {
         jniLibs {

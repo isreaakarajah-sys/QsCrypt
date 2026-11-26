@@ -122,17 +122,29 @@ def build(face, size, line_height, align, lines):
             c = pen.getCommands()
             if c:
                 cmds.append(c)
-    return ' '.join(cmds), width, height
+    return cmds, width, height
 
 
-def write(name, d, width, height, text):
+MAX_PATH = 24_000   # aapt2 refuses strings over 32 767 bytes: several paths when needed
+
+
+def write(name, cmds, width, height, text):
     w, h = round(width + 0.5), round(height + 0.5)
+    chunks, cur = [], ''
+    for c in cmds:
+        if cur and len(cur) + len(c) + 1 > MAX_PATH:
+            chunks.append(cur)
+            cur = ''
+        cur = (cur + ' ' + c) if cur else c
+    if cur:
+        chunks.append(cur)
+    paths = ''.join(f'    <path\n        android:fillColor="#FFFFFFFF"\n        android:pathData="{d}" />\n' for d in chunks)
     xml = ('<?xml version="1.0" encoding="utf-8"?>\n'
            f'<!-- "{" / ".join(text)}": outlines from the app\'s Hacen font, made by android/tools/text_art.py. Tinted in code. -->\n'
            '<vector xmlns:android="http://schemas.android.com/apk/res/android"\n'
            f'    android:width="{w}dp"\n    android:height="{h}dp"\n'
            f'    android:viewportWidth="{w * UNITS}"\n    android:viewportHeight="{h * UNITS}">\n'
-           f'    <path\n        android:fillColor="#FFFFFFFF"\n        android:pathData="{d}" />\n</vector>\n')
+           f'{paths}</vector>\n')
     with open(os.path.join(RES, name + '.xml'), 'w', encoding='utf-8') as f:
         f.write(xml)
     return w, h
@@ -145,5 +157,5 @@ if __name__ == '__main__':
     faces = {}
     for name, font, size, lh, align, lines in ART:
         face = faces.setdefault(font, Face(os.path.join(a.fonts, font + '.ttf')))
-        d, w, h = build(face, size, lh, align, lines)
-        print(name, write(name, d, w, h, lines), f'{len(d) // 1024} KB')
+        cmds, w, h = build(face, size, lh, align, lines)
+        print(name, write(name, cmds, w, h, lines), f'{sum(map(len, cmds)) // 1024} KB')

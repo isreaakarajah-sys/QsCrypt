@@ -5,6 +5,7 @@ The repository is public, so the fonts are only stored encrypted: the app
 decrypts them on the phone after the activation password is entered once.
 
     python3 android/tools/seal_assets.py --password 'XXXX-XXXX-XXXX-XXXX' \\
+        --pepper-file QS_ACTIVATION_PEPPER.txt \\
         --out android/app/src/main/assets/fonts.qsa \\
         hacen_xxl.ttf=/path/HacenLinerXXL.ttf hacen_xl.ttf=... hacen_print.ttf=...
 
@@ -14,6 +15,9 @@ Format (decrypted by qscrypt_core::qsc::open_asset):
 Plaintext bundle: "QSFONTS1" | u32 count | { u16 name length | name | u32 size | bytes }*
 
 The password is normalized like the app does: letters and digits only, upper case.
+The key is Argon2id(password + pepper): the pepper (32 bytes, hex in the file)
+is kept with the signing key, never in the repository, and written into the
+release library by pepper.py.
 Needs the `cryptography` package (Argon2id requires version 44 or later).
 """
 import argparse
@@ -24,8 +28,8 @@ import sys
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 
-MEMORY_KIB = 64 * 1024
-PASSES = 3
+MEMORY_KIB = 128 * 1024
+PASSES = 4
 LANES = 1
 
 
@@ -73,6 +77,7 @@ def bundle(files) -> bytes:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--password", required=True)
+    ap.add_argument("--pepper-file", required=True, help="32 bytes as hex, kept with the signing key")
     ap.add_argument("--out", required=True)
     ap.add_argument("files", nargs="+", help="name=path")
     a = ap.parse_args()
@@ -81,7 +86,10 @@ def main():
         name, path = spec.split("=", 1)
         with open(path, "rb") as f:
             files.append((name, f.read()))
-    sealed = seal(normalize(a.password), bundle(files))
+    pepper = bytes.fromhex(open(a.pepper_file).read().strip())
+    if len(pepper) != 32:
+        sys.exit("the pepper must be 32 bytes (64 hex digits)")
+    sealed = seal(normalize(a.password) + pepper, bundle(files))
     with open(a.out, "wb") as f:
         f.write(sealed)
     print(f"{a.out}: {len(sealed)} bytes, {len(files)} files", file=sys.stderr)
