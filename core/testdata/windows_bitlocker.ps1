@@ -26,11 +26,9 @@ foreach ($combo in @('exfat xts128', 'fat xts256', 'exfat cbc128')) {
       $root = "$($part.DriveLetter):"
       manage-bde -status $root | Out-String | Write-Host
       if ($cred -eq 'password') {
-        manage-bde -unlock $root -Password $pw 2>&1 | Out-String | Write-Host
-        if ($LASTEXITCODE -ne 0) {
-          $sec = ConvertTo-SecureString $pw -AsPlainText -Force
-          Unlock-BitLocker -MountPoint $root -Password $sec -ErrorAction SilentlyContinue | Out-Null
-        }
+        # manage-bde only prompts for passwords; the cmdlet takes one.
+        $sec = ConvertTo-SecureString $pw -AsPlainText -Force
+        Unlock-BitLocker -MountPoint $root -Password $sec -ErrorAction Stop | Out-Null
       } else {
         manage-bde -unlock $root -RecoveryPassword $rp 2>&1 | Out-String | Write-Host
       }
