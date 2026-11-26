@@ -133,6 +133,10 @@ impl Backend for RustCrypto {
         r
     }
 
+    fn aes128(&self, key: &[u8; 16]) -> Result<Box<dyn BlockCipher>> {
+        Ok(Box::new(Rc(aes::Aes128::new_from_slice(key).map_err(|_| Error::Crypto("bad key length".into()))?)))
+    }
+
     fn cipher(&self, kind: CipherKind, key: &[u8; 32]) -> Result<Box<dyn BlockCipher>> {
         let bad = |_| Error::Crypto(format!("{} key", kind.name()));
         Ok(match kind {

@@ -104,6 +104,11 @@ pub trait Backend: Send + Sync {
 
     fn cipher(&self, kind: CipherKind, key: &[u8; 32]) -> Result<Box<dyn BlockCipher>>;
 
+    /// AES with a 128-bit key (BitLocker's AES-128 methods).
+    fn aes128(&self, _key: &[u8; 16]) -> Result<Box<dyn BlockCipher>> {
+        Err(crate::error::Error::unsupported("AES-128"))
+    }
+
     /// Cryptographically secure random bytes from the operating system.
     fn fill_random(&self, out: &mut [u8]) -> Result<()>;
 

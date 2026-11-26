@@ -1,14 +1,45 @@
 //! File systems inside a decrypted volume.
 //!
 //! - FAT12/16/32: read and write, long file names.
-//! - exFAT: read-only for now.
-//! - NTFS / ReFS: recognized and reported as unsupported.
+//! - exFAT: read and write.
+//! - NTFS: read-only.
+//! - ReFS: recognized and reported as unsupported.
 
 pub mod exfat;
+mod exfat_format;
 pub mod fat;
 mod fat_format;
+pub mod ntfs;
 
+pub use exfat_format::exfat_format_plan;
 pub use fat_format::{apply_patches, format_plan, FatPlan};
+
+/// File system for a new volume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FsChoice {
+    /// FAT12/16/32 by size; files up to 4 GiB - 1.
+    Fat,
+    /// No practical file size limit; Windows 7+, macOS, Linux 5.4+.
+    Exfat,
+}
+
+impl FsChoice {
+    pub fn from_id(id: u32) -> Option<FsChoice> {
+        match id {
+            0 | 1 => Some(FsChoice::Fat),
+            2 => Some(FsChoice::Exfat),
+            _ => None,
+        }
+    }
+
+    /// Sparse formatting plan for a volume of `size` bytes.
+    pub fn plan(self, size: u64, label: &str, volume_id: u32) -> Result<FatPlan> {
+        match self {
+            FsChoice::Fat => format_plan(size, label, volume_id),
+            FsChoice::Exfat => exfat_format_plan(size, label, volume_id),
+        }
+    }
+}
 
 use crate::disk::Disk;
 use crate::error::{Error, Result};
@@ -50,6 +81,41 @@ pub trait FileSystem: Send {
     /// Renames within the same directory.
     fn rename(&mut self, path: &str, new_name: &str) -> Result<()>;
     fn flush(&mut self) -> Result<()>;
+
+    /// Keeps the allocator away from `[start, end)` (bytes from the start
+    /// of the volume): hidden volume protection. Free space shrinks
+    /// accordingly. Default: nothing to do (read-only file systems).
+    fn reserve(&mut self, _start: u64, _end: u64) {}
+
+    /// Byte ranges (from the start of the volume) a file occupies, in order.
+    fn extents(&mut self, _path: &str) -> Result<Vec<(u64, u64)>> {
+        Err(Error::unsupported("file extents on this file system"))
+    }
+
+    /// Marks a file or directory hidden + system (as Windows does for
+    /// "System Volume Information").
+    fn set_hidden_system(&mut self, _path: &str) -> Result<()> {
+        Err(Error::unsupported("attributes on this file system"))
+    }
+}
+
+/// Merges consecutive clusters into byte ranges.
+pub(crate) fn runs(clusters: &[u32], base: u64, cluster_size: u64, len: u64) -> Vec<(u64, u64)> {
+    let mut out: Vec<(u64, u64)> = Vec::new();
+    let mut left = len;
+    for &c in clusters {
+        if left == 0 {
+            break;
+        }
+        let off = base + (c as u64 - 2) * cluster_size;
+        let n = cluster_size.min(left);
+        match out.last_mut() {
+            Some((o, l)) if *o + *l == off => *l += n,
+            _ => out.push((off, n)),
+        }
+        left -= n;
+    }
+    out
 }
 
 /// Identifies the file system in a decrypted volume and mounts it.
@@ -60,8 +126,8 @@ pub fn mount(mut disk: Box<dyn Disk>, read_only: bool, tz_offset_min: i32) -> Re
     let mut boot = [0u8; 512];
     disk.read_at(0, &mut boot)?;
     match &boot[3..11] {
-        b"EXFAT   " => return Ok(Box::new(exfat::Exfat::mount(disk, tz_offset_min)?)),
-        b"NTFS    " => return Err(Error::unsupported("NTFS")),
+        b"EXFAT   " => return Ok(Box::new(exfat::Exfat::mount(disk, read_only, tz_offset_min)?)),
+        b"NTFS    " => return Ok(Box::new(ntfs::Ntfs::mount(disk)?)),
         _ => {}
     }
     if &boot[3..7] == b"ReFS" {

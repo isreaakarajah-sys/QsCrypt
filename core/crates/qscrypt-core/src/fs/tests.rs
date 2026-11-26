@@ -71,6 +71,10 @@ fn plan_types_by_size() {
 }
 
 fn exercise(d: &Shared, expect_kind: &str, fixed_root: bool) {
+    exercise_with(d, expect_kind, fixed_root, true)
+}
+
+fn exercise_with(d: &Shared, expect_kind: &str, fixed_root: bool, short_names: bool) {
     let mut fs = fs_of(d);
     assert_eq!(fs.kind(), expect_kind);
     assert_eq!(fs.label(), "TEST VOL");
@@ -101,7 +105,9 @@ fn exercise(d: &Shared, expect_kind: &str, fixed_root: bool) {
     }
     // Case-insensitive lookup and 8.3 aliases.
     assert_eq!(get(&mut fs, "/readme.txt"), files[2].1);
-    assert_eq!(get(&mut fs, "/MIXEDC~1.DOC"), files[6].1);
+    if short_names {
+        assert_eq!(get(&mut fs, "/MIXEDC~1.DOC"), files[6].1);
+    }
     let names: Vec<String> = fs.list("/").unwrap().into_iter().map(|e| e.name).collect();
     assert!(names.contains(&long_name), "{names:?}");
 
@@ -239,7 +245,10 @@ fn rejects_unknown_and_unsupported() {
     assert!(matches!(mount(Box::new(d.clone()), false, 0), Err(Error::Corrupt(_))));
     let mut ntfs = vec![0u8; 1 << 20];
     ntfs[3..11].copy_from_slice(b"NTFS    ");
-    assert!(matches!(mount(Box::new(Shared(Arc::new(Mutex::new(ntfs)))), false, 0), Err(Error::Unsupported(_))));
+    assert!(matches!(mount(Box::new(Shared(Arc::new(Mutex::new(ntfs)))), false, 0), Err(Error::Corrupt(_))));
+    let mut refs = vec![0u8; 1 << 20];
+    refs[3..7].copy_from_slice(b"ReFS");
+    assert!(matches!(mount(Box::new(Shared(Arc::new(Mutex::new(refs)))), false, 0), Err(Error::Unsupported(_))));
 }
 
 // ------------------------------------------------------------ exFAT
@@ -378,5 +387,91 @@ fn exfat_reads() {
     let mut buf = [0u8; 10];
     assert_eq!(fs.read_range("/fragmented.bin", 4090, &mut buf).unwrap(), 10);
     assert_eq!(buf.to_vec(), (4090..4100).map(|i| (i % 241) as u8 + 1).collect::<Vec<u8>>());
-    assert!(matches!(fs.mkdir("/x"), Err(Error::Unsupported(_))));
+    assert!(matches!(fs.mkdir("/x"), Err(Error::ReadOnly)));
+}
+
+#[test]
+fn exfat_hand_image_writes() {
+    let d = exfat_image();
+    let mut fs = fs_of(&d);
+    assert!(!fs.read_only());
+    put(&mut fs, "/new file.txt", b"written by QsCrypt");
+    fs.mkdir("/Sub/deeper").unwrap();
+    put(&mut fs, "/Sub/deeper/x.bin", &data(9000, 3));
+    fs.rename("/fragmented.bin", "renamed.bin").unwrap();
+    drop(fs);
+    let mut fs = fs_of(&d);
+    assert_eq!(get(&mut fs, "/new file.txt"), b"written by QsCrypt");
+    assert_eq!(get(&mut fs, "/Sub/deeper/x.bin"), data(9000, 3));
+    assert_eq!(get(&mut fs, "/Sub/inner.txt"), b"inner");
+    let frag = get(&mut fs, "/renamed.bin");
+    assert!(frag[..9000].iter().enumerate().all(|(i, &b)| b == (i % 241) as u8 + 1));
+    fs.remove("/renamed.bin").unwrap();
+    assert!(matches!(fs.stat("/fragmented.bin"), Err(Error::NotFound)));
+}
+
+fn exfat_formatted(size: usize, cluster: u64) -> Shared {
+    image(size, super::exfat_format::plan_with(size as u64, "TEST VOL", 0xBEEF, cluster).unwrap())
+}
+
+#[test]
+fn exfat_full_cycle() {
+    exercise_with(&exfat_formatted(8 << 20, 4096), "exFAT", false, false);
+}
+
+#[test]
+fn exfat_small_clusters_and_growth() {
+    // 512-byte clusters: directories grow cluster by cluster, files are
+    // split into many runs once the volume is fragmented.
+    let d = exfat_formatted(4 << 20, 512);
+    let mut fs = fs_of(&d);
+    let free0 = fs.free_bytes().unwrap();
+    for i in 0..200 {
+        put(&mut fs, &format!("/file with a fairly long name {i:03}.dat"), &data(700 + i * 3, i as u32));
+    }
+    for i in (0..200).step_by(2) {
+        fs.remove(&format!("/file with a fairly long name {i:03}.dat")).unwrap();
+    }
+    let big = data(300_000, 77);
+    put(&mut fs, "/big.bin", &big);
+    drop(fs);
+    let mut fs = fs_of(&d);
+    assert_eq!(fs.list("/").unwrap().len(), 101);
+    assert_eq!(get(&mut fs, "/big.bin"), big);
+    for i in (1..200).step_by(2) {
+        assert_eq!(get(&mut fs, &format!("/file with a fairly long name {i:03}.dat")), data(700 + i * 3, i as u32));
+    }
+    for e in fs.list("/").unwrap() {
+        fs.remove(&format!("/{}", e.name)).unwrap();
+    }
+    let free1 = fs.free_bytes().unwrap();
+    // Only the clusters the root directory grew by stay allocated.
+    assert!(free1 < free0 && free0 - free1 <= 64 * 512, "{free0} -> {free1}");
+}
+
+#[test]
+fn exfat_large_file_beyond_4gib_is_allowed() {
+    let d = exfat_formatted(4 << 20, 4096);
+    let fs = fs_of(&d);
+    assert_eq!(fs.max_file_size(), u64::MAX);
+}
+
+#[test]
+fn reserve_keeps_allocator_away() {
+    for d in [fat_image(24 << 20), exfat_formatted(24 << 20, 4096)] {
+        let mut fs = fs_of(&d);
+        let total_free = fs.free_bytes().unwrap();
+        let size = d.len();
+        fs.reserve(size - (8 << 20), size);
+        let free = fs.free_bytes().unwrap();
+        assert!(free < total_free - (7 << 20), "{} {total_free} {free}", fs.kind());
+        let too_big = vec![1u8; free as usize + 4096];
+        assert!(matches!(fs.write_file("/big", &mut too_big.as_slice(), too_big.len() as u64, false, &mut |_| true), Err(Error::NoSpace)));
+        let fits = vec![2u8; (free - 65536) as usize];
+        put(&mut fs, "/fits", &fits);
+        drop(fs);
+        // Nothing landed in the reserved region.
+        let img = d.0.lock().unwrap();
+        assert!(img[(size - (8 << 20)) as usize..].iter().all(|&b| b != 2));
+    }
 }

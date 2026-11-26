@@ -216,7 +216,8 @@ fn create_and_open_every_algorithm() {
     for ea in Ea::ALL {
         let size = vc::DATA_OFFSET * 2 + (1 << 20);
         let mut disk = MemDisk::new(size as usize);
-        let opts = vc::CreateOptions { format: vc::Format::VeraCrypt, password: b"pw", pim: 1, prf: Prf::Whirlpool, ea, size, label: "" };
+        let mut opts = vc::CreateOptions::new(vc::Format::VeraCrypt, b"pw", ea, Prf::Whirlpool, size);
+        opts.pim = 1;
         vc::create_container(&b, &mut disk, &opts, &mut |_, _| true, &NO).unwrap();
         let mut o = OpenOptions::new(b"pw");
         o.pim = 1;

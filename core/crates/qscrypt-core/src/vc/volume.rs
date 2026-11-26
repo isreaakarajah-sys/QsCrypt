@@ -13,6 +13,9 @@ pub struct EncVolume {
     data_offset: u64,
     data_size: u64,
     read_only: bool,
+    /// Absolute byte range of a hidden volume that writes must not touch.
+    protect: Option<(u64, u64)>,
+    tripped: bool,
 }
 
 impl EncVolume {
@@ -26,7 +29,23 @@ impl EncVolume {
             return Err(Error::corrupt("data area beyond end of file"));
         }
         let read_only = read_only || disk.is_read_only();
-        Ok(EncVolume { disk, chain, data_offset, data_size, read_only })
+        Ok(EncVolume { disk, chain, data_offset, data_size, read_only, protect: None, tripped: false })
+    }
+
+    /// Hidden volume protection: refuse writes overlapping `[start, end)`
+    /// (absolute offsets in the container). After the first refused write
+    /// every write is refused, as VeraCrypt does.
+    pub fn protect(&mut self, start: u64, end: u64) {
+        self.protect = Some((start, end));
+    }
+
+    /// The protected range relative to this volume's data area.
+    pub fn protected_range(&self) -> Option<(u64, u64)> {
+        self.protect.map(|(s, e)| (s.saturating_sub(self.data_offset), e.saturating_sub(self.data_offset).min(self.data_size)))
+    }
+
+    pub fn protection_tripped(&self) -> bool {
+        self.tripped
     }
 
     pub fn ea_name(&self) -> &'static str {
@@ -83,6 +102,14 @@ impl Disk for EncVolume {
             return Err(Error::ReadOnly);
         }
         self.check(offset, buf.len())?;
+        if let Some((start, end)) = self.protect {
+            let a = self.data_offset + offset;
+            let b = a + buf.len() as u64;
+            if self.tripped || (!buf.is_empty() && a < end && b > start) {
+                self.tripped = true;
+                return Err(Error::HiddenProtected);
+            }
+        }
         let mut done = 0usize;
         let mut scratch = Vec::new();
         while done < buf.len() {

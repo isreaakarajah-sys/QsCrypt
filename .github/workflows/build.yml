@@ -2,8 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [main]
-  pull_request:
+    branches: [main, dev]
   workflow_dispatch:
 
 permissions:
@@ -118,7 +117,7 @@ jobs:
     name: Publish release
     runs-on: ubuntu-latest
     needs: [core, apk]
-    if: github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/download-artifact@v4
         with:

@@ -252,7 +252,9 @@ pub fn create_volume(fd: i32, size: u64, password: &[u8], pim: u32, prf: u32, ea
         let size = size / 512 * 512;
         let mut disk = disk_from_fd(fd, false)?;
         disk.set_len(size)?;
-        let opts = vc::CreateOptions { format, password, pim, prf, ea, size, label };
+        let mut opts = vc::CreateOptions::new(format, password, ea, prf, size);
+        opts.pim = pim;
+        opts.label = label;
         vc::create_container(backend(), &mut disk, &opts, progress, &AtomicBool::new(false))?;
         Ok(Obj::new().bool("ok", true).uint("size", size).str("format", format.name()).str("ea", ea.name()).str("prf", prf.name()).end())
     })())

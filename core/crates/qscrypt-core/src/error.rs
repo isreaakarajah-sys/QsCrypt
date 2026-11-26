@@ -23,6 +23,9 @@ pub enum Error {
     Tampered,
     Cancelled,
     Crypto(String),
+    /// A write to the outer volume would have overwritten the hidden one;
+    /// all further writes are refused until the volume is closed.
+    HiddenProtected,
 }
 
 impl Error {
@@ -43,6 +46,7 @@ impl Error {
             Error::Tampered => "tampered",
             Error::Cancelled => "cancelled",
             Error::Crypto(_) => "crypto",
+            Error::HiddenProtected => "hidden_protected",
         }
     }
 
@@ -77,6 +81,7 @@ impl fmt::Display for Error {
             Error::Tampered => write!(f, "authentication failed: data modified or truncated"),
             Error::Cancelled => write!(f, "cancelled"),
             Error::Crypto(m) => write!(f, "crypto error: {m}"),
+            Error::HiddenProtected => write!(f, "write refused: it would damage the hidden volume"),
         }
     }
 }

@@ -31,11 +31,15 @@ pub struct OpenOptions<'a> {
     pub format: Option<Format>,
     pub try_hidden: bool,
     pub use_backup: bool,
+    /// Only the hidden volume header slots (for hidden volume protection).
+    pub hidden_only: bool,
+    /// Only the embedded backup headers (header repair).
+    pub backup_only: bool,
 }
 
 impl<'a> OpenOptions<'a> {
     pub fn new(password: &'a [u8]) -> OpenOptions<'a> {
-        OpenOptions { password, pim: 0, prf: None, format: None, try_hidden: true, use_backup: false }
+        OpenOptions { password, pim: 0, prf: None, format: None, try_hidden: true, use_backup: false, hidden_only: false, backup_only: false }
     }
 }
 
@@ -125,15 +129,25 @@ pub fn detect(backend: &dyn Backend, disk: &mut dyn Disk, opts: &OpenOptions, ca
         return Err(Error::corrupt("file too small to be a volume"));
     }
 
-    let mut locs = vec![read_location(disk, 0, false, false)?];
-    if opts.try_hidden && size >= HIDDEN_HEADER_OFFSET + HEADER_SIZE as u64 {
+    let normal = !opts.hidden_only;
+    let hidden = opts.try_hidden || opts.hidden_only;
+    let primary = !opts.backup_only;
+    let backup = (opts.use_backup || opts.backup_only) && size >= 2 * HEADER_GROUP + HEADER_SIZE as u64;
+    let mut locs = Vec::new();
+    if primary && normal {
+        locs.push(read_location(disk, 0, false, false)?);
+    }
+    if primary && hidden && size >= HIDDEN_HEADER_OFFSET + HEADER_SIZE as u64 {
         locs.push(read_location(disk, HIDDEN_HEADER_OFFSET, true, false)?);
     }
-    if opts.use_backup && size >= 2 * HEADER_GROUP + HEADER_SIZE as u64 {
+    if backup && normal {
         locs.push(read_location(disk, size - HEADER_GROUP, false, true)?);
-        if opts.try_hidden {
-            locs.push(read_location(disk, size - HIDDEN_HEADER_OFFSET, true, true)?);
-        }
+    }
+    if backup && hidden {
+        locs.push(read_location(disk, size - HIDDEN_HEADER_OFFSET, true, true)?);
+    }
+    if locs.is_empty() {
+        return Err(Error::corrupt("volume too small for these header locations"));
     }
 
     let formats = match opts.format {

@@ -96,6 +96,9 @@ pub struct Fat {
     dirty: Vec<bool>,
     free_hint: u32,
     free_count: Option<u32>,
+    /// Clusters [lo, hi) the allocator must not use, and how many of them are free.
+    reserved: Option<(u32, u32)>,
+    reserved_free: u32,
     read_only: bool,
     tz: i32,
     label: String,
@@ -181,6 +184,8 @@ impl Fat {
             fat,
             dirty: vec![false; fat_size as usize],
             free_hint: 2,
+            reserved: None,
+            reserved_free: 0,
             free_count: None,
             read_only,
             tz: tz_offset_min,
@@ -298,12 +303,21 @@ impl Fat {
         n
     }
 
+    fn is_reserved(&self, c: u32) -> bool {
+        self.reserved.is_some_and(|(lo, hi)| c >= lo && c < hi)
+    }
+
+    /// Free clusters the allocator may use.
+    fn available(&mut self) -> u32 {
+        self.free_clusters().saturating_sub(self.reserved_free)
+    }
+
     /// Allocates `n` clusters linked as one chain ending in EOC.
     fn alloc(&mut self, n: u32) -> Result<Vec<u32>> {
         if n == 0 {
             return Ok(Vec::new());
         }
-        if self.free_clusters() < n {
+        if self.available() < n {
             return Err(Error::NoSpace);
         }
         let mut got = Vec::with_capacity(n as usize);
@@ -313,7 +327,7 @@ impl Fat {
             if c >= self.clusters + 2 {
                 c = 2;
             }
-            if self.entry(c) == 0 {
+            if self.entry(c) == 0 && !self.is_reserved(c) {
                 got.push(c);
             }
             c += 1;
@@ -773,7 +787,7 @@ impl FileSystem for Fat {
     }
 
     fn free_bytes(&mut self) -> Result<u64> {
-        Ok(self.free_clusters() as u64 * self.cluster_size as u64)
+        Ok(self.available() as u64 * self.cluster_size as u64)
     }
 
     fn max_file_size(&self) -> u64 {
@@ -945,6 +959,39 @@ impl FileSystem for Fat {
     fn flush(&mut self) -> Result<()> {
         self.flush_fat()?;
         self.disk.flush()
+    }
+
+    fn extents(&mut self, path: &str) -> Result<Vec<(u64, u64)>> {
+        let (_, it) = self.resolve_item(path)?;
+        if it.first_cluster == 0 {
+            return Ok(Vec::new());
+        }
+        let chain = self.chain(it.first_cluster)?;
+        let len = if it.is_dir() { chain.len() as u64 * self.cluster_size as u64 } else { it.size as u64 };
+        Ok(super::runs(&chain, self.data_offset, self.cluster_size as u64, len))
+    }
+
+    fn set_hidden_system(&mut self, path: &str) -> Result<()> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+        let (mut dir, it) = self.resolve_item(path)?;
+        dir.data[it.sfn * ENTRY + 11] |= 0x06;
+        self.write_entries(&dir, it.sfn, 1)
+    }
+
+    fn reserve(&mut self, start: u64, end: u64) {
+        let cs = self.cluster_size as u64;
+        if end <= start || end <= self.data_offset {
+            return;
+        }
+        let lo = 2 + (start.saturating_sub(self.data_offset) / cs) as u32;
+        let hi = (2 + (end - self.data_offset).div_ceil(cs)).min(self.clusters as u64 + 2) as u32;
+        if lo >= hi {
+            return;
+        }
+        self.reserved = Some((lo, hi));
+        self.reserved_free = (lo..hi).filter(|&c| self.entry(c) == 0).count() as u32;
     }
 }
 

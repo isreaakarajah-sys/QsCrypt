@@ -23,6 +23,12 @@ const fn make_crc_table() -> [u32; 256] {
 
 static CRC_TABLE: [u32; 256] = make_crc_table();
 
+/// One step of the raw CRC-32 register (no initial or final inversion),
+/// as VeraCrypt's keyfile pool uses it.
+pub fn crc32_update(c: u32, b: u8) -> u32 {
+    CRC_TABLE[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8)
+}
+
 /// IEEE 802.3 CRC-32 (same as zlib), as used by VeraCrypt headers.
 pub fn crc32(data: &[u8]) -> u32 {
     let mut c = !0u32;
@@ -30,6 +36,24 @@ pub fn crc32(data: &[u8]) -> u32 {
         c = CRC_TABLE[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8);
     }
     !c
+}
+
+/// A GUID in its on-disk mixed-endian form, as text.
+pub fn guid_string(b: &[u8]) -> String {
+    format!(
+        "{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+        le32(b, 0),
+        le16(b, 4),
+        le16(b, 6),
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
+    )
 }
 
 // ---------------------------------------------------------------- wiping

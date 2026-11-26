@@ -14,12 +14,16 @@ mod chain;
 mod create;
 mod detect;
 mod header;
+pub mod keyfile;
+mod maintain;
 pub mod selftest;
 mod volume;
 
 pub use chain::CipherChain;
-pub use create::{create_container, CreateOptions};
+pub use create::{create_container, create_volume, max_hidden_size, CreateOptions, HiddenOptions, MIN_HIDDEN_SIZE, MIN_SIZE};
 pub use detect::{detect, OpenOptions, OpenedHeader};
+pub use keyfile::apply_keyfiles;
+pub use maintain::{backup_headers, change_password, hidden_range, repair_from_embedded, restore_from_file, Credentials};
 pub use header::{PlainHeader, ENC_SIZE, HEADER_SIZE, SALT_SIZE};
 pub use volume::EncVolume;
 

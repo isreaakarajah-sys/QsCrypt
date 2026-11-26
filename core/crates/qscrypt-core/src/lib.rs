@@ -9,13 +9,16 @@
 //!
 //! The production backend lives in the `qscrypt-crypto` crate.
 
+pub mod bde;
 pub mod crypto;
 pub mod disk;
 pub mod error;
 pub mod fs;
 pub mod json;
 pub mod kdf;
+pub mod part;
 pub mod qsc;
+pub mod usb;
 pub mod util;
 pub mod vc;
 pub mod xts;

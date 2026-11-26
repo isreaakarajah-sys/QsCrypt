@@ -114,6 +114,10 @@ impl Backend for RefBackend {
         }
     }
 
+    fn aes128(&self, key: &[u8; 16]) -> Result<Box<dyn BlockCipher>> {
+        Ok(Box::new(aes::Aes256::new128(key)))
+    }
+
     fn fill_random(&self, out: &mut [u8]) -> Result<()> {
         std::fs::File::open("/dev/urandom")?.read_exact(out)?;
         Ok(())

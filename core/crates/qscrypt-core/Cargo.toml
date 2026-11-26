@@ -16,3 +16,7 @@ default = []
 # Pure-Rust reference primitives (SHA-2, HMAC, PBKDF2, AES). Used by the test
 # suite and to cross-check production backends. Never used in release builds.
 reference = []
+
+[[example]]
+name = "fsprobe"
+required-features = ["reference"]

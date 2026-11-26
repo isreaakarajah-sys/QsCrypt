@@ -1,5 +1,5 @@
-//! Byte-oriented AES-256 (FIPS 197). Slow and not constant-time: reference
-//! and test use only, never production.
+//! Byte-oriented AES-128/256 (FIPS 197). Slow and not constant-time:
+//! reference and test use only, never production.
 
 use crate::crypto::BlockCipher;
 use std::sync::OnceLock;
@@ -57,9 +57,39 @@ fn gmul(mut a: u8, mut b: u8) -> u8 {
 
 pub struct Aes256 {
     rk: [[u8; 16]; 15],
+    nr: usize,
 }
 
+/// The same implementation keyed with 128 bits (10 rounds).
+pub type Aes128 = Aes256;
+
 impl Aes256 {
+    pub fn new128(key: &[u8; 16]) -> Aes256 {
+        let t = tables();
+        let mut w = [[0u8; 4]; 44];
+        for (i, word) in w.iter_mut().take(4).enumerate() {
+            word.copy_from_slice(&key[i * 4..i * 4 + 4]);
+        }
+        let mut rcon = 1u8;
+        for i in 4..44 {
+            let mut temp = w[i - 1];
+            if i % 4 == 0 {
+                temp = [t.sbox[temp[1] as usize] ^ rcon, t.sbox[temp[2] as usize], t.sbox[temp[3] as usize], t.sbox[temp[0] as usize]];
+                rcon = xtime(rcon);
+            }
+            for k in 0..4 {
+                w[i][k] = w[i - 4][k] ^ temp[k];
+            }
+        }
+        let mut rk = [[0u8; 16]; 15];
+        for (r, key) in rk.iter_mut().take(11).enumerate() {
+            for c in 0..4 {
+                key[c * 4..c * 4 + 4].copy_from_slice(&w[r * 4 + c]);
+            }
+        }
+        Aes256 { rk, nr: 10 }
+    }
+
     pub fn new(key: &[u8; 32]) -> Aes256 {
         let t = tables();
         let mut w = [[0u8; 4]; 60];
@@ -85,7 +115,7 @@ impl Aes256 {
                 key[c * 4..c * 4 + 4].copy_from_slice(&w[r * 4 + c]);
             }
         }
-        Aes256 { rk }
+        Aes256 { rk, nr: 14 }
     }
 
     fn add(s: &mut [u8; 16], k: &[u8; 16]) {
@@ -96,8 +126,9 @@ impl Aes256 {
 
     pub fn encrypt_block(&self, s: &mut [u8; 16]) {
         let t = tables();
+        let nr = self.nr;
         Self::add(s, &self.rk[0]);
-        for round in 1..15 {
+        for round in 1..=nr {
             for b in s.iter_mut() {
                 *b = t.sbox[*b as usize];
             }
@@ -107,7 +138,7 @@ impl Aes256 {
                     s[4 * c + r] = o[4 * ((c + r) % 4) + r];
                 }
             }
-            if round != 14 {
+            if round != nr {
                 for c in 0..4 {
                     let a = [s[4 * c], s[4 * c + 1], s[4 * c + 2], s[4 * c + 3]];
                     s[4 * c] = gmul(a[0], 2) ^ gmul(a[1], 3) ^ a[2] ^ a[3];
@@ -122,8 +153,8 @@ impl Aes256 {
 
     pub fn decrypt_block(&self, s: &mut [u8; 16]) {
         let t = tables();
-        Self::add(s, &self.rk[14]);
-        for round in (0..14).rev() {
+        Self::add(s, &self.rk[self.nr]);
+        for round in (0..self.nr).rev() {
             let o = *s;
             for c in 0..4 {
                 for r in 0..4 {
