@@ -1,0 +1,22 @@
+name: Research
+on:
+  push:
+    branches: [research]
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: cryptsetup bitlk.c
+        run: curl -fsSL https://gitlab.com/cryptsetup/cryptsetup/-/raw/main/lib/bitlk/bitlk.c | cat -n || echo FAILED
+      - name: cryptsetup bitlk.h
+        run: curl -fsSL https://gitlab.com/cryptsetup/cryptsetup/-/raw/main/lib/bitlk/bitlk.h | cat -n || echo FAILED
+      - name: cryptsetup bitlk test script
+        run: curl -fsSL https://gitlab.com/cryptsetup/cryptsetup/-/raw/main/tests/bitlk-compat-test | cat -n || echo FAILED
+      - name: libbde format doc
+        run: curl -fsSL "https://raw.githubusercontent.com/libyal/libbde/main/documentation/BitLocker%20Drive%20Encryption%20(BDE)%20format.asciidoc" | cat -n || echo FAILED
+      - name: dislocker sources
+        run: |
+          for f in src/encryption/diffuser.c src/encryption/decrypt.c src/encryption/encrypt.c src/encryption/crypto.c src/inouts/sectors.c src/inouts/inouts.c src/metadata/metadata.c src/metadata/datums.c include/dislocker/metadata/datums.h include/dislocker/metadata/metadata.priv.h src/accesses/user_pass/user_pass.c src/accesses/stretch_key.c src/accesses/rp/recovery_password.c src/encryption/aes-xts.c; do
+            echo "=================== $f"
+            curl -fsSL https://raw.githubusercontent.com/Aorimn/dislocker/master/$f | cat -n || echo "FAILED $f"
+          done
