@@ -58,6 +58,19 @@ data class Contact(val name: String, val card: String, val safety: String, val f
     }
 }
 
+/** One failed attempt: the app lock, the disguise calculator, a vault or a QsCrypt file. */
+data class Attempt(val time: Long, val kind: String, val target: String) {
+    fun toJson(): JSONObject = JSONObject().put("t", time).put("k", kind).put("n", target)
+
+    companion object {
+        fun from(j: JSONObject) = Attempt(j.getLong("t"), j.optString("k"), j.optString("n"))
+    }
+}
+
+const val SECRET_PIN = 0
+const val SECRET_PATTERN = 1
+const val SECRET_NONE = 2
+
 /** App settings and the PIN, in app-private storage. Never holds passwords. */
 object Prefs {
     private lateinit var sp: SharedPreferences
@@ -68,18 +81,37 @@ object Prefs {
 
     // ---------------------------------------------------------- PIN
 
+    /** An internal secret (PIN or pattern) is set. */
     fun hasPin(): Boolean = sp.contains("pin_hash")
 
-    fun setPin(pin: String): Boolean {
+    /** What unlocks the app inside QsCrypt: a PIN, a pattern, or nothing (the phone's lock only). */
+    var secretKind: Int
+        get() = sp.getInt("secret_kind", if (hasPin()) SECRET_PIN else -1)
+        set(v) = sp.edit().putInt("secret_kind", v).apply()
+
+    /** The app lock is set up, with an internal secret or with the phone's lock only. */
+    fun lockConfigured(): Boolean = hasPin() || secretKind == SECRET_NONE
+
+    fun setPin(pin: String): Boolean = setSecret(SECRET_PIN, pin)
+
+    /** Stores a PIN or a pattern (its dots as digits 1-9) as a salted PBKDF2 hash. */
+    fun setSecret(kind: Int, secret: String): Boolean {
         val salt = QsCore.randomBytes(32) ?: return false
-        val hash = QsCore.pinHash(pin.toByteArray(), salt) ?: return false
+        val hash = QsCore.pinHash(secret.toByteArray(), salt) ?: return false
         sp.edit()
             .putString("pin_salt", b64(salt))
             .putString("pin_hash", b64(hash))
+            .putInt("secret_kind", kind)
             .putInt("fail_count", 0)
             .putLong("lock_until", 0)
             .apply()
         return true
+    }
+
+    /** No internal secret: the phone's fingerprint, face or lock opens the app. */
+    fun clearSecret() {
+        sp.edit().remove("pin_salt").remove("pin_hash").putInt("secret_kind", SECRET_NONE)
+            .putInt("fail_count", 0).putLong("lock_until", 0).apply()
     }
 
     fun checkPin(pin: String): Boolean {
@@ -126,6 +158,72 @@ object Prefs {
     var closeVaultsOnLock: Boolean
         get() = sp.getBoolean("close_on_lock", true)
         set(v) = sp.edit().putBoolean("close_on_lock", v).apply()
+
+    /** Close every vault and lock when the screen turns off. */
+    var closeOnScreenOff: Boolean
+        get() = sp.getBoolean("close_screen_off", false)
+        set(v) = sp.edit().putBoolean("close_screen_off", v).apply()
+
+    /** Close vaults after this many minutes without use (0: never). */
+    var idleCloseMinutes: Int
+        get() = sp.getInt("idle_close_min", 0)
+        set(v) = sp.edit().putInt("idle_close_min", v).apply()
+
+    /** A notification with "lock all" while vaults are open and the app is in the background. */
+    var openVaultsNotice: Boolean
+        get() = sp.getBoolean("open_notice", true)
+        set(v) = sp.edit().putBoolean("open_notice", v).apply()
+
+    /** Background operations pause when the battery is low and the phone is not charging. */
+    var notificationsAsked: Boolean
+        get() = sp.getBoolean("notif_asked", false)
+        set(v) = sp.edit().putBoolean("notif_asked", v).apply()
+
+    var pauseOnLowBattery: Boolean
+        get() = sp.getBoolean("pause_low_battery", true)
+        set(v) = sp.edit().putBoolean("pause_low_battery", v).apply()
+
+    // ---------------------------------------------------------- failed attempts
+
+    /** Wrong PINs, patterns and passwords, newest first (at most 100). */
+    fun attemptsLog(): List<Attempt> {
+        val arr = runCatching { JSONArray(sp.getString("attempts", "[]")) }.getOrElse { JSONArray() }
+        return (0 until arr.length()).mapNotNull { runCatching { Attempt.from(arr.getJSONObject(it)) }.getOrNull() }
+    }
+
+    fun logAttempt(kind: String, target: String = "") {
+        if (!logAttempts) return
+        val list = listOf(Attempt(System.currentTimeMillis(), kind, target)) + attemptsLog().take(99)
+        val arr = JSONArray()
+        list.forEach { arr.put(it.toJson()) }
+        sp.edit().putString("attempts", arr.toString()).apply()
+    }
+
+    fun clearAttempts() = sp.edit().remove("attempts").putLong("attempts_seen", System.currentTimeMillis()).apply()
+
+    var logAttempts: Boolean
+        get() = sp.getBoolean("log_attempts", true)
+        set(v) = sp.edit().putBoolean("log_attempts", v).apply()
+
+    /** When the log was last shown; newer entries are reported after unlocking. */
+    var attemptsSeen: Long
+        get() = sp.getLong("attempts_seen", 0)
+        set(v) = sp.edit().putLong("attempts_seen", v).apply()
+
+    // ---------------------------------------------------------- background fill of free space
+
+    /** Where filling a container's free space stopped (bytes), or -1 if nothing is pending. */
+    fun fillCursor(id: String): Long = sp.getLong("fill_$id", -1)
+
+    fun setFillCursor(id: String, cursor: Long) = sp.edit().putLong("fill_$id", cursor).apply()
+
+    fun clearFill(id: String) = sp.edit().remove("fill_$id").apply()
+
+    // ---------------------------------------------------------- unfinished jobs (no secrets)
+
+    var pendingJobs: String
+        get() = sp.getString("pending_jobs", "[]") ?: "[]"
+        set(v) = sp.edit().putString("pending_jobs", v).apply()
 
     // ---------------------------------------------------------- time (clock rollback detection)
 
@@ -248,6 +346,14 @@ object Saf {
     fun delete(context: Context, uri: Uri) {
         runCatching { DocumentsContract.deleteDocument(context.contentResolver, uri) }
     }
+
+    /** The display name of a folder picked with OpenDocumentTree. */
+    fun treeName(context: Context, tree: Uri): String = runCatching {
+        val doc = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+        context.contentResolver.query(doc, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        }
+    }.getOrNull() ?: tree.lastPathSegment?.substringAfterLast(':')?.substringAfterLast('/')?.ifBlank { null } ?: "مجلد"
 }
 
 /** "4.0 GB", "812 KB"... */

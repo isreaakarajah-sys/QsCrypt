@@ -8,8 +8,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -45,6 +45,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -61,16 +62,24 @@ const val SPLASH_MS = 7_000
 private const val VERSE = "فَاللَّهُ خَيْرٌ حَافِظًا\nوَهُوَ أَرْحَمُ الرَّاحِمِينَ"
 private const val OPEN = "\uFD3F"
 private const val CLOSE = "\uFD3E"
-private const val DUA_1 = "اللَّهُمَّ انْصُرِ الْإِسْلَامَ وَالْمُسْلِمِينَ"
-private const val DUA_2 = "اللَّهُمَّ أَعِزَّ الْإِسْلَامَ وَالْمُسْلِمِينَ"
+
+/** The supplication, one clause per line. */
+private val DUA = listOf(
+    "اللَّهُمَّ اكْسِرْ بِنَا شَوْكَتَهُمْ",
+    "اللَّهُمَّ نَكِّسْ بِنَا رَايَتَهُمْ",
+    "اللَّهُمَّ أَذِلَّ بِنَا قَادَتَهُمْ",
+    "اللَّهُمَّ حَطِّمْ بِنَا هَيْبَتَهُمْ",
+    "اللَّهُمَّ أَنْفِذْ بِنَا قَدَرَكَ فِيهِمْ",
+)
 const val RELEASE_YEAR = "2026"
 const val RELEASE_NAME = "الإصدار الأول"
+const val DEVELOPER = "SaJedApps"
 
 /**
- * The opening screen, shown on every launch before any lock or password:
- * the emblem and name, the verse, the supplication, and the edition.
- * The Arabic texts use the system Naskh font, which carries the full
- * diacritics of the Qur'anic text.
+ * The opening screen, shown on every launch after activation and before any
+ * lock: the emblem and name, the verse, the supplication, the edition and
+ * the developer's signature. Everything scales down together on short or
+ * narrow screens, so nothing is cut or wrapped.
  */
 @Composable
 fun SplashScreen(onDone: () -> Unit) {
@@ -85,8 +94,8 @@ fun SplashScreen(onDone: () -> Unit) {
         launch { progress.animateTo(1f, tween(SPLASH_MS, easing = LinearEasing)) }
         launch { logo.animateTo(1f, tween(1100, easing = FastOutSlowInEasing)) }
         launch { verse.animateTo(1f, tween(1400, delayMillis = 900, easing = FastOutSlowInEasing)) }
-        launch { dua.animateTo(1f, tween(1400, delayMillis = 2200, easing = FastOutSlowInEasing)) }
-        launch { footer.animateTo(1f, tween(1000, delayMillis = 3200)) }
+        launch { dua.animateTo(1f, tween(1600, delayMillis = 2200, easing = FastOutSlowInEasing)) }
+        launch { footer.animateTo(1f, tween(1000, delayMillis = 3400)) }
         kotlinx.coroutines.delay(SPLASH_MS.toLong())
         onDone()
     }
@@ -101,85 +110,104 @@ fun SplashScreen(onDone: () -> Unit) {
             withStyle(bracket) { append(CLOSE) }
         }
     }
-    Box(
+    BoxWithConstraints(
         Modifier
             .fillMaxSize()
             .background(Brush.verticalGradient(listOf(Color(0xFF0C3326), Qs.base, Color(0xFF071F18))))
-            .semantics { contentDescription = "QsCrypt. ${VERSE.replace('\n', ' ')}. $DUA_1. $DUA_2. $RELEASE_NAME $RELEASE_YEAR" },
+            .semantics { contentDescription = "QsCrypt. ${VERSE.replace('\n', ' ')}. ${DUA.joinToString("، ")}. $RELEASE_NAME. $DEVELOPER $RELEASE_YEAR" },
     ) {
+        // Laid out for 860 x 400 dp; smaller screens scale everything down.
+        val k = minOf(maxHeight / 860.dp, maxWidth / 400.dp, 1f).coerceAtLeast(0.62f)
+        fun d(v: Int) = (v * k).dp
+        fun s(v: Int) = (v * k).sp
+
         // A faint brass halo behind the emblem.
         Canvas(Modifier.fillMaxSize()) {
             drawCircle(
-                Brush.radialGradient(listOf(Qs.brass.copy(alpha = 0.16f * logo.value), Color.Transparent), center = Offset(size.width / 2, size.height * 0.24f), radius = size.width * 0.62f),
+                Brush.radialGradient(listOf(Qs.brass.copy(alpha = 0.16f * logo.value), Color.Transparent), center = Offset(size.width / 2, size.height * 0.2f), radius = size.width * 0.62f),
                 radius = size.width * 0.62f,
-                center = Offset(size.width / 2, size.height * 0.24f),
+                center = Offset(size.width / 2, size.height * 0.2f),
             )
         }
         Column(
-            Modifier.fillMaxSize().padding(horizontal = 30.dp),
+            Modifier.fillMaxSize().padding(horizontal = d(26)),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Spacer(Modifier.weight(0.9f))
+            Spacer(Modifier.weight(0.8f))
             Image(
                 painterResource(R.drawable.qs_emblem),
                 contentDescription = null,
-                modifier = Modifier.size(112.dp).alpha(logo.value).scale(0.86f + 0.14f * logo.value),
+                modifier = Modifier.size(d(100)).alpha(logo.value).scale(0.86f + 0.14f * logo.value),
             )
-            Gap(18.dp)
+            Gap(d(14))
             Image(
                 painterResource(R.drawable.qs_wordmark),
                 contentDescription = "QsCrypt",
-                modifier = Modifier.height(34.dp).alpha(logo.value),
+                modifier = Modifier.height(d(30)).alpha(logo.value),
             )
-            Gap(8.dp)
+            Gap(d(6))
             Text(
                 "التشفير بثقة",
-                style = TextStyle(fontFamily = HacenXL, fontSize = 13.sp, color = Qs.muted, letterSpacing = 1.sp),
+                style = TextStyle(fontFamily = HacenXL, fontSize = s(13), color = Qs.muted, letterSpacing = 1.sp),
                 modifier = Modifier.alpha(logo.value),
             )
-            Spacer(Modifier.weight(0.7f))
+            Spacer(Modifier.weight(0.6f))
 
             Ornament(Modifier.alpha(verse.value))
-            Gap(22.dp)
+            Gap(d(16))
             Text(
                 verseText,
-                style = TextStyle(fontFamily = HacenXL, fontSize = 34.sp, lineHeight = 62.sp, color = Qs.ivory),
+                style = TextStyle(fontFamily = HacenXL, fontSize = s(34), lineHeight = s(60), color = Qs.ivory),
                 textAlign = TextAlign.Center,
+                softWrap = false,
                 modifier = Modifier.alpha(verse.value),
             )
-            Gap(30.dp)
+            Gap(d(22))
             Column(
-                Modifier.alpha(dua.value).clip(RoundedCornerShape(18.dp)).background(Qs.surface.copy(alpha = 0.55f)).padding(horizontal = 20.dp, vertical = 14.dp),
+                Modifier.alpha(dua.value).clip(RoundedCornerShape(d(18))).background(Qs.surface.copy(alpha = 0.55f)).padding(horizontal = d(20), vertical = d(12)),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                val style = TextStyle(fontFamily = HacenPrint, fontSize = 21.sp, lineHeight = 40.sp, color = Color(0xFFE8DDBF))
-                Text(DUA_1, style = style, textAlign = TextAlign.Center)
-                Text(DUA_2, style = style, textAlign = TextAlign.Center)
+                val style = TextStyle(fontFamily = HacenPrint, fontSize = s(21), lineHeight = s(40), color = Color(0xFFE8DDBF))
+                DUA.forEachIndexed { i, line ->
+                    // Each clause fades in a moment after the one before it.
+                    val a = ((dua.value * (DUA.size + 1)) - i).coerceIn(0f, 1f)
+                    Text(line, style = style, textAlign = TextAlign.Center, softWrap = false, modifier = Modifier.alpha(a))
+                }
             }
-            Gap(22.dp)
+            Gap(d(18))
             Ornament(Modifier.alpha(dua.value))
             Spacer(Modifier.weight(1f))
 
-            // Edition: year and "first edition", set like a book's colophon.
+            // The edition, then the developer's signature and the year.
             Row(Modifier.alpha(footer.value), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.width(34.dp).height(1.dp).background(Qs.brass.copy(alpha = 0.6f)))
-                Spacer(Modifier.width(12.dp))
-                Text(RELEASE_NAME, style = TextStyle(fontFamily = HacenXL, fontSize = 15.sp, color = Qs.ivory))
-                Spacer(Modifier.width(10.dp))
-                Box(Modifier.size(4.dp).clip(RoundedCornerShape(2.dp)).background(Qs.brass))
-                Spacer(Modifier.width(10.dp))
-                Text(RELEASE_YEAR, style = TextStyle(fontFamily = PlexMono, fontSize = 15.sp, color = Qs.brass, letterSpacing = 2.sp))
-                Spacer(Modifier.width(12.dp))
-                Box(Modifier.width(34.dp).height(1.dp).background(Qs.brass.copy(alpha = 0.6f)))
+                Box(Modifier.width(d(34)).height(1.dp).background(Qs.brass.copy(alpha = 0.6f)))
+                Spacer(Modifier.width(d(12)))
+                Text(RELEASE_NAME, style = TextStyle(fontFamily = HacenXL, fontSize = s(16), color = Qs.ivory))
+                Spacer(Modifier.width(d(12)))
+                Box(Modifier.width(d(34)).height(1.dp).background(Qs.brass.copy(alpha = 0.6f)))
             }
-            Gap(6.dp)
-            Text("v" + appVersion(context), style = T.mono.copy(color = Qs.muted.copy(alpha = 0.7f)), modifier = Modifier.alpha(footer.value))
-            Gap(18.dp)
+            Gap(d(8))
+            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                Row(Modifier.alpha(footer.value), verticalAlignment = Alignment.Bottom) {
+                    Text(
+                        DEVELOPER,
+                        style = TextStyle(fontFamily = FontFamily.Serif, fontStyle = FontStyle.Italic, fontWeight = FontWeight.Medium, fontSize = s(19), color = Qs.brass, letterSpacing = 0.6.sp),
+                    )
+                    Spacer(Modifier.width(d(8)))
+                    Text(
+                        "© $RELEASE_YEAR",
+                        style = TextStyle(fontFamily = PlexMono, fontSize = s(12), color = Qs.muted, letterSpacing = 1.sp),
+                        modifier = Modifier.padding(bottom = d(2)),
+                    )
+                }
+            }
+            Gap(d(4))
+            Text("v" + appVersion(context), style = T.mono.copy(color = Qs.muted.copy(alpha = 0.6f), fontSize = s(11)), modifier = Modifier.alpha(footer.value))
+            Gap(d(14))
             Box(Modifier.fillMaxWidth(0.42f).height(2.dp).clip(RoundedCornerShape(1.dp)).background(Qs.line)) {
                 Box(Modifier.fillMaxWidth(progress.value).height(2.dp).background(Qs.brass))
             }
-            Gap(26.dp)
+            Gap(d(22))
         }
     }
 }

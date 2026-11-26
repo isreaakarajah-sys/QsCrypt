@@ -38,6 +38,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -352,6 +355,11 @@ fun AboutScreen() {
             }
             Gap(6.dp)
             Text("المحرك $engine", style = T.mono.copy(color = Qs.brass, fontSize = 13.sp))
+            Gap(10.dp)
+            Text(
+                "$DEVELOPER  ©  $RELEASE_YEAR",
+                style = TextStyle(fontFamily = FontFamily.Serif, fontStyle = FontStyle.Italic, fontSize = 17.sp, color = Qs.brass),
+            )
         }
         Gap(24.dp)
         Note("التطبيق لا يطلب صلاحية الإنترنت أصلاً: لا شيء يغادر جهازك، ولا يمكن لأي ملف أن يتسرّب عبر الشبكة.", icon = R.drawable.ic_wifioff)

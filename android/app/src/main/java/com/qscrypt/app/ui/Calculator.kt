@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.sp
 import com.qscrypt.app.AppState
 import com.qscrypt.app.PhoneAuth
 import com.qscrypt.app.Prefs
+import com.qscrypt.app.SECRET_PATTERN
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -66,6 +67,8 @@ object Disguise {
             pm.setComponentEnabledSetting(calc, PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, PackageManager.DONT_KILL_APP)
         }
         Prefs.disguised = on
+        // The share target and the quick settings tile would name the app.
+        com.qscrypt.app.Guard.components(context, on)
         true
     }.getOrDefault(false)
 }
@@ -140,12 +143,21 @@ fun CalculatorScreen() {
     val preview = if (shown == null) calculate(expr)?.takeIf { it != expr } else null
 
     fun opened() {
-        Prefs.failCount = 0
-        Prefs.lockUntil = 0
         expr = ""
         shown = null
-        AppState.pinPassed = true
-        if (PhoneAuth.mode(context) != PhoneAuth.Mode.TwoFactor) AppState.locked = false
+        if (PhoneAuth.mode(context) != PhoneAuth.Mode.TwoFactor) {
+            noteUnlocked()
+        } else {
+            Prefs.failCount = 0
+            Prefs.lockUntil = 0
+            AppState.pinPassed = true
+        }
+    }
+
+    /** The PIN (6 digits), or a pattern's dots (4 to 9 distinct digits 1-9). */
+    fun looksLikeCode(code: String): Boolean = when (Prefs.secretKind) {
+        SECRET_PATTERN -> code.length in PATTERN_MIN..9 && code.all { it in '1'..'9' } && code.toSet().size == code.length
+        else -> code.length == 6 && code.all { it.isDigit() }
     }
 
     fun press(k: String) {
@@ -162,7 +174,7 @@ fun CalculatorScreen() {
             }
             "=" -> {
                 val code = expr
-                if (code.length == 6 && code.all { it.isDigit() } && Prefs.lockUntil <= System.currentTimeMillis()) {
+                if (looksLikeCode(code) && Prefs.lockUntil <= System.currentTimeMillis()) {
                     checking = true
                     scope.launch {
                         val ok = withContext(Dispatchers.Default) { Prefs.checkPin(code) }
@@ -171,9 +183,7 @@ fun CalculatorScreen() {
                             opened()
                         } else {
                             // Looks like an ordinary calculation; counts as a failed attempt.
-                            val n = Prefs.failCount + 1
-                            Prefs.failCount = n
-                            if (n >= 5) Prefs.lockUntil = System.currentTimeMillis() + (30L shl (n - 5).coerceAtMost(7)).coerceAtMost(3600) * 1000
+                            noteFailure("calc")
                             shown = code
                         }
                     }
