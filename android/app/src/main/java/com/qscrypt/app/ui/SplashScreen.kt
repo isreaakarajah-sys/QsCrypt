@@ -60,7 +60,6 @@ const val SPLASH_MS = 7_000
 private const val VERSE = "فَاللَّهُ خَيْرٌ حَافِظًا وَهُوَ أَرْحَمُ الرَّاحِمِينَ"
 private const val OPEN = "\uFD3F"
 private const val CLOSE = "\uFD3E"
-private const val VERSE_REF = "سورة يوسف · الآية ٦٤"
 private const val DUA_1 = "اللَّهُمَّ انْصُرِ الْإِسْلَامَ وَالْمُسْلِمِينَ"
 private const val DUA_2 = "اللَّهُمَّ أَعِزَّ الْإِسْلَامَ وَالْمُسْلِمِينَ"
 const val RELEASE_YEAR = "2026"
@@ -143,23 +142,17 @@ fun SplashScreen(onDone: () -> Unit) {
             Gap(22.dp)
             Text(
                 verseText,
-                style = TextStyle(fontFamily = HacenXL, fontSize = 24.sp, lineHeight = 46.sp, color = Qs.ivory),
+                style = TextStyle(fontFamily = HacenXL, fontSize = 31.sp, lineHeight = 58.sp, color = Qs.ivory),
                 textAlign = TextAlign.Center,
                 modifier = Modifier.alpha(verse.value),
             )
-            Gap(8.dp)
-            Text(
-                VERSE_REF,
-                style = TextStyle(fontFamily = HacenPrint, fontSize = 13.sp, color = Qs.brass),
-                modifier = Modifier.alpha(verse.value),
-            )
-            Gap(26.dp)
+            Gap(30.dp)
             Column(
                 Modifier.alpha(dua.value).clip(RoundedCornerShape(18.dp)).background(Qs.surface.copy(alpha = 0.55f)).padding(horizontal = 20.dp, vertical = 14.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                val style = TextStyle(fontFamily = HacenPrint, fontSize = 17.sp, lineHeight = 34.sp, color = Color(0xFFE8DDBF))
+                val style = TextStyle(fontFamily = HacenPrint, fontSize = 21.sp, lineHeight = 40.sp, color = Color(0xFFE8DDBF))
                 Text(DUA_1, style = style, textAlign = TextAlign.Center)
                 Text(DUA_2, style = style, textAlign = TextAlign.Center)
             }
