@@ -40,7 +40,10 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -52,7 +55,11 @@ import kotlinx.coroutines.launch
 /** How long the opening screen stays, and cannot be skipped. */
 const val SPLASH_MS = 7_000
 
-private const val VERSE = "﴿ فَاللَّهُ خَيْرٌ حَافِظًا ۖ وَهُوَ أَرْحَمُ الرَّاحِمِينَ ﴾"
+// Set in the app's own Hacen fonts, which carry every letter and haraka of the
+// verse; only the ornate brackets come from the system's Naskh face.
+private const val VERSE = "فَاللَّهُ خَيْرٌ حَافِظًا وَهُوَ أَرْحَمُ الرَّاحِمِينَ"
+private const val OPEN = "\uFD3F"
+private const val CLOSE = "\uFD3E"
 private const val VERSE_REF = "سورة يوسف · الآية ٦٤"
 private const val DUA_1 = "اللَّهُمَّ انْصُرِ الْإِسْلَامَ وَالْمُسْلِمِينَ"
 private const val DUA_2 = "اللَّهُمَّ أَعِزَّ الْإِسْلَامَ وَالْمُسْلِمِينَ"
@@ -83,7 +90,17 @@ fun SplashScreen(onDone: () -> Unit) {
         kotlinx.coroutines.delay(SPLASH_MS.toLong())
         onDone()
     }
-    val naskh = FontFamily.Serif
+    // Brackets as brass ornaments around the verse.
+    val verseText = remember {
+        buildAnnotatedString {
+            val bracket = SpanStyle(fontFamily = FontFamily.Serif, color = Qs.brass, fontWeight = FontWeight.Normal)
+            withStyle(bracket) { append(OPEN) }
+            append("  ")
+            append(VERSE)
+            append("  ")
+            withStyle(bracket) { append(CLOSE) }
+        }
+    }
     Box(
         Modifier
             .fillMaxSize()
@@ -125,15 +142,15 @@ fun SplashScreen(onDone: () -> Unit) {
             Ornament(Modifier.alpha(verse.value))
             Gap(22.dp)
             Text(
-                VERSE,
-                style = TextStyle(fontFamily = naskh, fontSize = 25.sp, lineHeight = 46.sp, color = Qs.ivory, fontWeight = FontWeight.Medium),
+                verseText,
+                style = TextStyle(fontFamily = HacenXL, fontSize = 24.sp, lineHeight = 46.sp, color = Qs.ivory),
                 textAlign = TextAlign.Center,
                 modifier = Modifier.alpha(verse.value),
             )
-            Gap(6.dp)
+            Gap(8.dp)
             Text(
                 VERSE_REF,
-                style = TextStyle(fontFamily = naskh, fontSize = 13.sp, color = Qs.brass),
+                style = TextStyle(fontFamily = HacenPrint, fontSize = 13.sp, color = Qs.brass),
                 modifier = Modifier.alpha(verse.value),
             )
             Gap(26.dp)
@@ -142,7 +159,7 @@ fun SplashScreen(onDone: () -> Unit) {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                val style = TextStyle(fontFamily = naskh, fontSize = 17.sp, lineHeight = 32.sp, color = Color(0xFFE8DDBF))
+                val style = TextStyle(fontFamily = HacenPrint, fontSize = 17.sp, lineHeight = 34.sp, color = Color(0xFFE8DDBF))
                 Text(DUA_1, style = style, textAlign = TextAlign.Center)
                 Text(DUA_2, style = style, textAlign = TextAlign.Center)
             }

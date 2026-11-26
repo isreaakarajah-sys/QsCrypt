@@ -99,8 +99,11 @@ fun QsApp() {
                     }
                 }
                 when {
-                    !AppState.splashDone -> SplashScreen(onDone = { AppState.splashDone = true })
+                    // The Hacen fonts are sealed with the activation password, so on the
+                    // very first launch activation comes first: the opening screen then
+                    // always appears in the app's own fonts.
                     !active -> ActivationScreen(onDone = { active = true })
+                    !AppState.splashDone -> SplashScreen(onDone = { AppState.splashDone = true })
                     !hasPin -> PinSetupScreen(onDone = {
                         hasPin = true
                         AppState.locked = false

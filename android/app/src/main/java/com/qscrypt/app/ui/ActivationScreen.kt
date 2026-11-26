@@ -102,7 +102,7 @@ fun ActivationScreen(onDone: () -> Unit) {
         QsField(
             value = code,
             onValueChange = { code = it.take(40); error = null },
-            placeholder = "XXXX-XXXX-XXXX-XXXX",
+            placeholder = "رمز التفعيل",
             password = true,
             highlighted = true,
         )
