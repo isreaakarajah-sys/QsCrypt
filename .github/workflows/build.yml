@@ -105,7 +105,7 @@ jobs:
       - name: Collect APK
         run: |
           mkdir -p dist
-          cp android/app/build/outputs/apk/release/app-release.apk "dist/QsCrypt-0.1.${GITHUB_RUN_NUMBER}.apk"
+          cp android/app/build/outputs/apk/release/app-release.apk "dist/QsCrypt-1.0.${GITHUB_RUN_NUMBER}.apk"
           cd dist && sha256sum *.apk | tee SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
@@ -127,9 +127,9 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: QsCrypt 0.1.${{ github.run_number }} (تجريبية)
-          prerelease: true
+          name: QsCrypt 1.0.${{ github.run_number }} · الإصدار الأول
+          prerelease: false
           files: dist/*
           body: |
-            نسخة تجريبية مبنية تلقائياً من `main` (commit ${{ github.sha }}).
+            الإصدار الأول، مبني تلقائياً من `main` (commit ${{ github.sha }}).
             نزّل ملف الـ APK وركّبه على الجوال. بصمة الملف (SHA-256) في `SHA256SUMS.txt`.
