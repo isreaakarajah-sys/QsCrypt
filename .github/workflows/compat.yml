@@ -29,9 +29,40 @@ jobs:
           cargo build --release -p qscrypt-crypto --example bdeprobe --example volprobe
       - name: File systems (FAT, exFAT, NTFS)
         run: core/testdata/fs_compat.sh
+      - name: NTFS writing (ntfs-3g, ntfs3, ntfsfix)
+        if: always()
+        run: core/testdata/ntfs_compat.sh
+      - name: Keep the written NTFS disks for Windows
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-disks
+          path: ntfs-out/
+          retention-days: 3
       - name: BitLocker and VeraCrypt (cryptsetup)
         if: always()
         run: core/testdata/crypt_compat.sh
+
+  ntfs-windows:
+    name: NTFS written by QsCrypt, checked by Windows (chkdsk)
+    runs-on: windows-latest
+    needs: compat
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build probe
+        working-directory: core
+        run: cargo build --release -p qscrypt-core --features reference --example fsprobe
+      - name: Disks written on Linux
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ntfs-disks
+          path: ntfs-out
+      - name: Windows formats, QsCrypt writes, chkdsk checks (and back)
+        shell: pwsh
+        run: core/testdata/ntfs_windows.ps1
 
   windows:
     name: BitLocker VHD on real Windows (informational)

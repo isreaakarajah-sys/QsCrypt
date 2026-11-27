@@ -161,6 +161,7 @@ fn info_json(handle: i64, v: &mut Vault) -> String {
         .str("fs", v.fs.kind())
         .str("label", &v.fs.label())
         .bool("readOnly", v.fs.read_only())
+        .str("roReason", &v.fs.read_only_reason().unwrap_or_default())
         .uint("total", v.fs.total_bytes())
         .uint("free", free)
         .uint("maxFile", v.fs.max_file_size())
@@ -219,6 +220,17 @@ pub(crate) fn with_vault<T>(handle: i64, f: impl FnOnce(&mut Vault) -> Result<T,
     f(&mut guard)
 }
 
+/// A change, then a flush, failed or not: when the call returns, the volume
+/// is complete on its device (NTFS no longer marked as being written), so a
+/// drive pulled out right after is fine.
+pub(crate) fn changing<T>(handle: i64, f: impl FnOnce(&mut Vault) -> Result<T, Error>) -> Result<T, Error> {
+    with_vault(handle, |v| {
+        let r = f(v);
+        let flushed = v.fs.flush();
+        r.and_then(|x| flushed.map(|_| x))
+    })
+}
+
 pub fn volume_info(handle: i64) -> String {
     reply(with_vault(handle, |v| Ok(info_json(handle, v))))
 }
@@ -268,7 +280,10 @@ pub fn export_file(handle: i64, path: &str, out_fd: i32, progress: &mut dyn FnMu
 }
 
 pub fn import_file(handle: i64, in_fd: i32, size: u64, dest: &str, overwrite: bool, progress: &mut dyn FnMut(u64, u64) -> bool) -> String {
-    reply(with_vault(handle, |v| {
+    reply(changing(handle, |v| {
+        if v.fs.read_only() {
+            return Err(Error::ReadOnly);
+        }
         if size > v.fs.max_file_size() {
             return Err(Error::unsupported(format!("files over {} bytes on {}", v.fs.max_file_size(), v.fs.kind())));
         }
@@ -282,18 +297,18 @@ pub fn import_file(handle: i64, in_fd: i32, size: u64, dest: &str, overwrite: bo
 }
 
 pub fn mkdir(handle: i64, path: &str) -> String {
-    reply(with_vault(handle, |v| v.fs.mkdir(path).map(|_| ok())))
+    reply(changing(handle, |v| v.fs.mkdir(path).map(|_| ok())))
 }
 
 pub fn remove(handle: i64, path: &str) -> String {
-    reply(with_vault(handle, |v| {
+    reply(changing(handle, |v| {
         check_pinned(v, path)?;
         v.fs.remove(path).map(|_| ok())
     }))
 }
 
 pub fn rename(handle: i64, path: &str, new_name: &str) -> String {
-    reply(with_vault(handle, |v| {
+    reply(changing(handle, |v| {
         check_pinned(v, path)?;
         v.fs.rename(path, new_name).map(|_| ok())
     }))

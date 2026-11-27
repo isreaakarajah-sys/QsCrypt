@@ -2,7 +2,7 @@
 //!
 //! - FAT12/16/32: read and write, long file names.
 //! - exFAT: read and write.
-//! - NTFS: read-only.
+//! - NTFS: read and write (writing only when Windows closed it cleanly).
 //! - ReFS: recognized and reported as unsupported.
 
 pub mod exfat;
@@ -106,6 +106,10 @@ pub trait FileSystem: Send {
     fn kind(&self) -> &'static str;
     fn label(&self) -> String;
     fn read_only(&self) -> bool;
+    /// Why a volume asked to be writable was opened read-only anyway.
+    fn read_only_reason(&self) -> Option<String> {
+        None
+    }
     fn total_bytes(&self) -> u64;
     fn free_bytes(&mut self) -> Result<u64>;
     /// Largest file the file system can store.
@@ -215,7 +219,7 @@ pub fn mount(mut disk: Box<dyn Disk>, read_only: bool, tz_offset_min: i32) -> Re
     disk.read_at(0, &mut boot)?;
     match &boot[3..11] {
         b"EXFAT   " => return Ok(Box::new(exfat::Exfat::mount(disk, read_only, tz_offset_min)?)),
-        b"NTFS    " => return Ok(Box::new(ntfs::Ntfs::mount(disk)?)),
+        b"NTFS    " => return Ok(Box::new(ntfs::Ntfs::mount(disk, read_only)?)),
         _ => {}
     }
     if &boot[3..7] == b"ReFS" {

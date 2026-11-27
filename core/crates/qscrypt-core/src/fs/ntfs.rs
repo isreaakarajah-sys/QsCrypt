@@ -1,30 +1,67 @@
-//! NTFS, read-only.
+//! NTFS, read and write.
 //!
-//! Enough of NTFS 3.x to browse and read what Windows (or VeraCrypt on
-//! Windows) writes: MFT records with update-sequence fixups, data runs,
-//! attribute lists for fragmented files, the `$I30` directory B-tree,
-//! resident, non-resident and sparse data. Compressed and EFS-encrypted
-//! files are reported as unsupported rather than returned wrong.
+//! Reading covers what Windows (or VeraCrypt on Windows) writes: MFT records
+//! with update-sequence fixups, data runs, attribute lists for fragmented
+//! files, the `$I30` directory B-tree, resident, non-resident and sparse
+//! data. Compressed and EFS-encrypted files are reported as unsupported
+//! rather than returned wrong.
+//!
+//! Writing (see `ntfs_write.rs`) is our own implementation, used only when
+//! Windows closed the volume cleanly; otherwise the volume stays read-only
+//! and says why.
 
-use super::{components, same_name, DirEntry, FileSystem, Progress};
+use super::{components, same_name, split_parent, validate_name, CheckReport, DirEntry, FileSystem, Progress};
 use crate::disk::Disk;
 use crate::error::{Error, Result};
-use crate::util::{le16, le32, le64};
+use crate::util::{le16, le32, le64, put_le16};
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::io::{Read, Write};
 
+#[path = "ntfs_write.rs"]
+mod write;
+
+#[cfg(test)]
+#[path = "ntfs_tests.rs"]
+mod ntfs_tests;
+
 const IO_CHUNK: usize = 1 << 20;
 const ROOT: u64 = 5;
+const MFT_RECORD_MIRROR: u64 = 1;
+const MFT_RECORD_LOGFILE: u64 = 2;
 const MFT_RECORD_VOLUME: u64 = 3;
 const MFT_RECORD_BITMAP: u64 = 6;
+const MFT_RECORD_UPCASE: u64 = 10;
+const MFT_RECORD_EXTEND: u64 = 11;
 
 const AT_STANDARD_INFORMATION: u32 = 0x10;
 const AT_ATTRIBUTE_LIST: u32 = 0x20;
+const AT_FILE_NAME: u32 = 0x30;
+const AT_OBJECT_ID: u32 = 0x40;
+const AT_SECURITY_DESCRIPTOR: u32 = 0x50;
 const AT_VOLUME_NAME: u32 = 0x60;
+const AT_VOLUME_INFORMATION: u32 = 0x70;
 const AT_DATA: u32 = 0x80;
 const AT_INDEX_ROOT: u32 = 0x90;
 const AT_INDEX_ALLOCATION: u32 = 0xA0;
+const AT_BITMAP: u32 = 0xB0;
+const AT_REPARSE_POINT: u32 = 0xC0;
 const AT_END: u32 = 0xFFFF_FFFF;
+
+/// $FILE_NAME namespaces.
+const NS_POSIX: u8 = 0;
+const NS_DOS: u8 = 2;
+
+/// Index collations.
+const COLLATION_FILE_NAME: u32 = 1;
+const COLLATION_NTOFS_ULONG: u32 = 0x10;
+const COLLATION_NTOFS_ULONGS: u32 = 0x13;
+
+/// $FILE_NAME attribute flag of a directory.
+const FA_DIRECTORY_INDEX: u32 = 0x1000_0000;
+
+/// The low 48 bits of a file reference: the record number.
+const REF_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
 const FLAG_COMPRESSED: u16 = 0x0001;
 const FLAG_ENCRYPTED: u16 = 0x4000;
@@ -84,18 +121,153 @@ impl Stream {
 struct Item {
     name: String,
     record: u64,
+    /// Sequence number of the record, from the reference that led here.
+    seq: u16,
     is_dir: bool,
+}
+
+impl Item {
+    fn file_ref(&self) -> u64 {
+        self.record | (self.seq as u64) << 48
+    }
 }
 
 pub struct Ntfs {
     disk: Box<dyn Disk>,
     cluster_size: u64,
     record_size: usize,
+    index_block_size: u64,
     total_clusters: u64,
     mft: Vec<Run>,
     mft_size: u64,
+    /// The $MFT data continues in extension records.
+    mft_listed: bool,
     label: String,
     free: Option<u64>,
+    root_seq: u16,
+    /// $UpCase: the volume's own case table (empty if unreadable).
+    upcase: Vec<u16>,
+    /// Present when the volume may be written.
+    w: Option<Box<write::State>>,
+    /// Why a volume opened for writing stays read-only.
+    ro_reason: Option<String>,
+}
+
+/// One entry of an index node, as stored (header, key, view data, padding)
+/// but without its child pointer, which is kept apart.
+#[derive(Clone, Debug)]
+struct Ent {
+    bytes: Vec<u8>,
+    child: Option<u64>,
+    end: bool,
+}
+
+impl Ent {
+    fn end(child: Option<u64>) -> Ent {
+        let mut bytes = vec![0u8; 16];
+        put_le16(&mut bytes, 8, 16);
+        put_le16(&mut bytes, 12, 2);
+        Ent { bytes, child, end: true }
+    }
+
+    fn key(&self) -> &[u8] {
+        let n = (le16(&self.bytes, 10) as usize).min(self.bytes.len().saturating_sub(16));
+        &self.bytes[16..16 + n]
+    }
+
+    fn file_ref(&self) -> u64 {
+        le64(&self.bytes, 0)
+    }
+
+    fn record(&self) -> u64 {
+        self.file_ref() & REF_MASK
+    }
+
+    /// Bytes on disk, child pointer included.
+    fn size(&self) -> usize {
+        self.bytes.len() + if self.child.is_some() { 8 } else { 0 }
+    }
+
+    fn with_child(mut self, child: Option<u64>) -> Ent {
+        self.child = child;
+        self
+    }
+}
+
+/// The entries of an index node whose header starts at `header`.
+fn parse_node(data: &[u8], header: usize) -> Result<Vec<Ent>> {
+    if header + 16 > data.len() {
+        return Err(Error::corrupt("short NTFS index node"));
+    }
+    let start = header + le32(data, header) as usize;
+    let end = (header + le32(data, header + 4) as usize).min(data.len());
+    let mut out = Vec::new();
+    let mut p = start;
+    loop {
+        if p + 16 > end {
+            return Err(Error::corrupt("NTFS index node without an end entry"));
+        }
+        let elen = le16(data, p + 8) as usize;
+        let klen = le16(data, p + 10) as usize;
+        let eflags = le16(data, p + 12);
+        let has_child = eflags & 0x01 != 0;
+        let is_end = eflags & 0x02 != 0;
+        let body = if has_child { elen.saturating_sub(8) } else { elen };
+        if elen < 16 || p + elen > end || elen % 8 != 0 || body < 16 || (!is_end && 16 + klen > body) {
+            return Err(Error::corrupt("bad NTFS index entry"));
+        }
+        let child = if has_child { Some(le64(data, p + elen - 8)) } else { None };
+        let bytes = if is_end { data[p..p + 16].to_vec() } else { data[p..p + body].to_vec() };
+        out.push(Ent { bytes, child, end: is_end });
+        if is_end {
+            return Ok(out);
+        }
+        p += elen;
+        if out.len() > 100_000 {
+            return Err(Error::corrupt("NTFS index node too long"));
+        }
+    }
+}
+
+/// Appends index entries as stored: lengths and flags are recomputed.
+fn put_entries(ents: &[Ent], out: &mut Vec<u8>) {
+    for e in ents {
+        let at = out.len();
+        out.extend_from_slice(&e.bytes);
+        if let Some(c) = e.child {
+            out.extend_from_slice(&c.to_le_bytes());
+        }
+        let len = out.len() - at;
+        put_le16(out, at + 8, len as u16);
+        if e.end {
+            put_le16(out, at + 10, 0);
+        }
+        let mut fl = le16(out, at + 12) & !0x03;
+        if e.child.is_some() {
+            fl |= 0x01;
+        }
+        if e.end {
+            fl |= 0x02;
+        }
+        put_le16(out, at + 12, fl);
+    }
+}
+
+fn entries_size(ents: &[Ent]) -> usize {
+    ents.iter().map(Ent::size).sum()
+}
+
+/// The UTF-16 name inside a $FILE_NAME value.
+fn fn_name(key: &[u8]) -> &[u8] {
+    if key.len() < 66 {
+        return &[];
+    }
+    let n = key[64] as usize;
+    &key[66..(66 + 2 * n).min(key.len())]
+}
+
+fn units_of(name: &[u8]) -> impl Iterator<Item = u16> + '_ {
+    name.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]))
 }
 
 fn apply_fixup(buf: &mut [u8], magic: &[u8; 4]) -> Result<()> {
@@ -213,7 +385,7 @@ fn parse_record(buf: &[u8]) -> Result<Record> {
 }
 
 impl Ntfs {
-    pub fn mount(mut disk: Box<dyn Disk>) -> Result<Ntfs> {
+    pub fn mount(mut disk: Box<dyn Disk>, read_only: bool) -> Result<Ntfs> {
         let mut b = [0u8; 512];
         disk.read_at(0, &mut b)?;
         if &b[3..11] != b"NTFS    " {
@@ -232,6 +404,7 @@ impl Ntfs {
             }
         };
         let record_size = size_of(b[64]);
+        let index_block_size = size_of(b[68]);
         if !matches!(bps, 512 | 1024 | 2048 | 4096) || spc == 0 || cluster_size > (2 << 20) || !(512..=65536).contains(&record_size) {
             return Err(Error::corrupt("unusual NTFS geometry"));
         }
@@ -249,14 +422,21 @@ impl Ntfs {
             disk,
             cluster_size,
             record_size: record_size as usize,
+            index_block_size,
             total_clusters,
             mft: data.runs.clone(),
             mft_size: data.size,
+            mft_listed: false,
             label: String::new(),
             free: None,
+            root_seq: ROOT as u16,
+            upcase: Vec::new(),
+            w: None,
+            ro_reason: None,
         };
         // A very fragmented $MFT continues in extension records.
         if r0.attrs.iter().any(|a| a.ty == AT_ATTRIBUTE_LIST) {
+            fs.mft_listed = true;
             if let Stream::NonResident { runs, size, .. } = fs.stream(0, AT_DATA, &[])? {
                 fs.mft = runs;
                 fs.mft_size = size;
@@ -265,6 +445,29 @@ impl Ntfs {
         if let Ok(Stream::Resident(v)) = fs.stream(MFT_RECORD_VOLUME, AT_VOLUME_NAME, &[]) {
             let units: Vec<u16> = v.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
             fs.label = String::from_utf16_lossy(&units);
+        }
+        if let Ok(raw) = fs.record_buf(ROOT) {
+            fs.root_seq = le16(&raw, 16);
+        }
+        // The case table orders every directory index. Without it names are
+        // looked up one by one, and nothing is written.
+        if let Ok(s) = fs.stream(MFT_RECORD_UPCASE, AT_DATA, &[]) {
+            if s.size() == 131_072 {
+                let mut t = vec![0u8; 131_072];
+                if fs.read_stream(&s, 0, &mut t).is_ok() {
+                    fs.upcase = units_of(&t).collect();
+                }
+            }
+        }
+        if !read_only {
+            if fs.disk.is_read_only() {
+                fs.ro_reason = Some("the drive itself is read-only".into());
+            } else {
+                match write::State::open(&mut fs) {
+                    Ok(st) => fs.w = Some(Box::new(st)),
+                    Err(why) => fs.ro_reason = Some(why),
+                }
+            }
         }
         Ok(fs)
     }
@@ -300,13 +503,21 @@ impl Ntfs {
         Ok(())
     }
 
-    fn read_record(&mut self, n: u64) -> Result<Record> {
+    /// Record `n` with its fixups undone.
+    fn record_buf(&mut self, n: u64) -> Result<Vec<u8>> {
         let rs = self.record_size as u64;
         let off = n.checked_mul(rs).filter(|o| o + rs <= self.mft_size).ok_or(Error::NotFound)?;
         let mut buf = vec![0u8; self.record_size];
-        let (runs, size) = (self.mft.clone(), self.mft_size);
-        self.read_runs(&runs, size, size, off, &mut buf)?;
+        let (runs, size) = (std::mem::take(&mut self.mft), self.mft_size);
+        let r = self.read_runs(&runs, size, size, off, &mut buf);
+        self.mft = runs;
+        r?;
         apply_fixup(&mut buf, b"FILE")?;
+        Ok(buf)
+    }
+
+    fn read_record(&mut self, n: u64) -> Result<Record> {
+        let buf = self.record_buf(n)?;
         parse_record(&buf)
     }
 
@@ -386,32 +597,29 @@ impl Ntfs {
         }
     }
 
-    fn index_entries(&mut self, data: &[u8], header: usize, out: &mut Vec<(u64, Vec<u8>)>, children: &mut Vec<u64>) -> Result<()> {
-        let start = header + le32(data, header) as usize;
-        let end = (header + le32(data, header + 4) as usize).min(data.len());
-        let mut p = start;
-        while p + 16 <= end {
-            let elen = le16(data, p + 8) as usize;
-            let klen = le16(data, p + 10) as usize;
-            let eflags = le16(data, p + 12);
-            if elen < 16 || p + elen > end {
-                return Err(Error::corrupt("bad NTFS index entry"));
-            }
-            if eflags & 0x01 != 0 {
-                children.push(le64(data, p + elen - 8));
-            }
-            if eflags & 0x02 != 0 {
-                break;
-            }
-            if 16 + klen <= elen && klen >= 66 {
-                out.push((le64(data, p) & 0x0000_FFFF_FFFF_FFFF, data[p + 16..p + 16 + klen].to_vec()));
-            }
-            p += elen;
+    /// The VCN unit of an index: clusters, or 512-byte units when index
+    /// blocks are smaller than a cluster.
+    fn index_unit(&self, block_size: u64) -> u64 {
+        if block_size >= self.cluster_size {
+            self.cluster_size
+        } else {
+            512
         }
-        Ok(())
     }
 
-    /// Every (record, $FILE_NAME key) in a directory's $I30 index.
+    /// Index block at `vcn` of an $INDEX_ALLOCATION stream, fixups undone.
+    fn index_block(&mut self, alloc: &Stream, block_size: u64, vcn: u64) -> Result<Vec<u8>> {
+        let off = vcn.checked_mul(self.index_unit(block_size)).ok_or_else(|| Error::corrupt("bad NTFS index VCN"))?;
+        if off + block_size > alloc.size() {
+            return Err(Error::corrupt("NTFS index block beyond its allocation"));
+        }
+        let mut block = vec![0u8; block_size as usize];
+        self.read_stream(alloc, off, &mut block)?;
+        apply_fixup(&mut block, b"INDX")?;
+        Ok(block)
+    }
+
+    /// Every (file reference, $FILE_NAME key) in a directory's $I30 index.
     fn dir_keys(&mut self, dir: u64) -> Result<Vec<(u64, Vec<u8>)>> {
         let root = match self.stream(dir, AT_INDEX_ROOT, &I30) {
             Ok(Stream::Resident(v)) => v,
@@ -425,58 +633,172 @@ impl Ntfs {
         let block_size = le32(&root, 8) as u64;
         let mut out = Vec::new();
         let mut pending = Vec::new();
-        self.index_entries(&root, 16, &mut out, &mut pending)?;
+        let take = |ents: Vec<Ent>, out: &mut Vec<(u64, Vec<u8>)>, pending: &mut Vec<u64>| {
+            for e in ents {
+                if let Some(c) = e.child {
+                    pending.push(c);
+                }
+                if !e.end && e.key().len() >= 66 {
+                    out.push((e.file_ref(), e.key().to_vec()));
+                }
+            }
+        };
+        take(parse_node(&root, 16)?, &mut out, &mut pending);
         if pending.is_empty() {
             return Ok(out);
         }
         let alloc = self.stream(dir, AT_INDEX_ALLOCATION, &I30)?;
-        // Index block numbers count clusters, or 512-byte units when blocks
-        // are smaller than a cluster.
-        let unit = if block_size >= self.cluster_size { self.cluster_size } else { 512 };
         let mut seen = HashSet::new();
         while let Some(vcn) = pending.pop() {
             if !seen.insert(vcn) || seen.len() > 1_000_000 {
                 continue;
             }
-            let mut block = vec![0u8; block_size as usize];
-            let off = vcn * unit;
-            if off + block_size > alloc.size() {
-                return Err(Error::corrupt("NTFS index block beyond its allocation"));
-            }
-            self.read_stream(&alloc, off, &mut block)?;
-            apply_fixup(&mut block, b"INDX")?;
-            self.index_entries(&block, 24, &mut out, &mut pending)?;
+            let block = self.index_block(&alloc, block_size, vcn)?;
+            take(parse_node(&block, 24)?, &mut out, &mut pending);
         }
         Ok(out)
     }
 
+    fn item_of(file_ref: u64, key: &[u8]) -> Item {
+        let units: Vec<u16> = units_of(fn_name(key)).collect();
+        Item {
+            name: String::from_utf16_lossy(&units),
+            record: file_ref & REF_MASK,
+            seq: (file_ref >> 48) as u16,
+            is_dir: le32(key, 56) & FA_DIRECTORY_INDEX != 0,
+        }
+    }
+
     fn items(&mut self, dir: u64) -> Result<Vec<Item>> {
         let mut items = Vec::new();
-        for (record, key) in self.dir_keys(dir)? {
-            let nlen = key[64] as usize;
+        for (file_ref, key) in self.dir_keys(dir)? {
             let namespace = key[65];
-            if namespace == 2 || 66 + 2 * nlen > key.len() {
+            if namespace == NS_DOS {
                 continue; // DOS 8.3 alias of a long name
             }
-            let units: Vec<u16> = (0..nlen).map(|i| le16(&key, 66 + 2 * i)).collect();
-            let name = String::from_utf16_lossy(&units);
-            if name == "." || (record < 24 && name.starts_with('$')) {
+            let it = Self::item_of(file_ref, &key);
+            if it.name == "." || (it.record < 24 && it.name.starts_with('$')) {
                 continue; // the root's self-entry and metadata files
             }
-            let is_dir = le32(&key, 56) & 0x1000_0000 != 0;
-            items.push(Item { name, record, is_dir });
+            items.push(it);
         }
         Ok(items)
     }
 
+    fn up(&self, c: u16) -> u16 {
+        match self.upcase.get(c as usize) {
+            Some(&u) => u,
+            None if (b'a' as u16..=b'z' as u16).contains(&c) => c - 32,
+            None => c,
+        }
+    }
+
+    /// File-name order: upper-cased per $UpCase, then shorter first.
+    fn cmp_names_ic(&self, a: &[u8], b: &[u8]) -> Ordering {
+        let mut ia = units_of(a);
+        let mut ib = units_of(b);
+        loop {
+            match (ia.next(), ib.next()) {
+                (Some(x), Some(y)) => match self.up(x).cmp(&self.up(y)) {
+                    Ordering::Equal => continue,
+                    o => return o,
+                },
+                (None, None) => return Ordering::Equal,
+                (None, _) => return Ordering::Less,
+                (_, None) => return Ordering::Greater,
+            }
+        }
+    }
+
+    /// The order of keys in an index with collation `coll`.
+    fn collate(&self, coll: u32, a: &[u8], b: &[u8]) -> Ordering {
+        match coll {
+            COLLATION_FILE_NAME => {
+                let (na, nb) = (fn_name(a), fn_name(b));
+                self.cmp_names_ic(na, nb).then_with(|| units_of(na).cmp(units_of(nb)))
+            }
+            COLLATION_NTOFS_ULONG if a.len() >= 4 && b.len() >= 4 => le32(a, 0).cmp(&le32(b, 0)),
+            COLLATION_NTOFS_ULONGS => {
+                let words = |k: &[u8]| -> Vec<u32> { k.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect() };
+                words(a).cmp(&words(b))
+            }
+            _ => a.cmp(b),
+        }
+    }
+
+    /// Looks `name` up in a directory by walking its B-tree (case-insensitive,
+    /// as Windows does). Falls back to a full scan when the index cannot be
+    /// walked.
+    fn lookup(&mut self, dir: u64, name: &str) -> Result<Option<Item>> {
+        let probe: Vec<u8> = name.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        match self.walk_lookup(dir, &probe) {
+            Ok(found) => Ok(found),
+            Err(Error::NotADirectory) => Err(Error::NotADirectory),
+            Err(_) => Ok(self.items(dir)?.into_iter().find(|it| same_name(&it.name, name))),
+        }
+    }
+
+    fn walk_lookup(&mut self, dir: u64, probe: &[u8]) -> Result<Option<Item>> {
+        let root = match self.stream(dir, AT_INDEX_ROOT, &I30) {
+            Ok(Stream::Resident(v)) => v,
+            Ok(_) => return Err(Error::corrupt("non-resident index root")),
+            Err(Error::NotFound) => return Err(Error::NotADirectory),
+            Err(e) => return Err(e),
+        };
+        if root.len() < 32 || le32(&root, 4) != COLLATION_FILE_NAME || self.upcase.is_empty() {
+            return Err(Error::unsupported("index walk"));
+        }
+        let block_size = le32(&root, 8) as u64;
+        let mut ents = parse_node(&root, 16)?;
+        let mut alloc: Option<Stream> = None;
+        for _depth in 0..64 {
+            let mut next = None;
+            for e in &ents {
+                if e.end {
+                    next = e.child;
+                    break;
+                }
+                match self.cmp_names_ic(probe, fn_name(e.key())) {
+                    Ordering::Equal => {
+                        let it = Self::item_of(e.file_ref(), e.key());
+                        return Ok(Some(it));
+                    }
+                    Ordering::Less => {
+                        next = e.child;
+                        break;
+                    }
+                    Ordering::Greater => {}
+                }
+            }
+            let Some(vcn) = next else { return Ok(None) };
+            if alloc.is_none() {
+                alloc = Some(self.stream(dir, AT_INDEX_ALLOCATION, &I30)?);
+            }
+            let block = self.index_block(alloc.as_ref().unwrap(), block_size, vcn)?;
+            ents = parse_node(&block, 24)?;
+        }
+        Err(Error::corrupt("NTFS index too deep"))
+    }
+
+    fn root_item(&self) -> Item {
+        Item { name: String::new(), record: ROOT, seq: self.root_seq, is_dir: true }
+    }
+
     fn resolve(&mut self, path: &str) -> Result<Item> {
         let comps = components(path)?;
-        let mut cur = Item { name: String::new(), record: ROOT, is_dir: true };
+        self.resolve_comps(&comps)
+    }
+
+    fn resolve_comps(&mut self, comps: &[&str]) -> Result<Item> {
+        let mut cur = self.root_item();
         for comp in comps {
             if !cur.is_dir {
                 return Err(Error::NotADirectory);
             }
-            cur = self.items(cur.record)?.into_iter().find(|it| same_name(&it.name, comp)).ok_or(Error::NotFound)?;
+            cur = self.lookup(cur.record, comp)?.ok_or(Error::NotFound)?;
+            if cur.name == "." || (cur.record < 24 && cur.name.starts_with('$')) {
+                return Err(Error::NotFound);
+            }
         }
         Ok(cur)
     }
@@ -514,7 +836,15 @@ impl FileSystem for Ntfs {
     }
 
     fn read_only(&self) -> bool {
-        true
+        self.w.is_none()
+    }
+
+    fn read_only_reason(&self) -> Option<String> {
+        if self.w.is_some() {
+            None
+        } else {
+            self.ro_reason.clone()
+        }
     }
 
     fn total_bytes(&self) -> u64 {
@@ -522,6 +852,9 @@ impl FileSystem for Ntfs {
     }
 
     fn free_bytes(&mut self) -> Result<u64> {
+        if self.w.is_some() {
+            return Ok(self.available()? * self.cluster_size);
+        }
         if let Some(f) = self.free {
             return Ok(f);
         }
@@ -547,7 +880,7 @@ impl FileSystem for Ntfs {
     }
 
     fn max_file_size(&self) -> u64 {
-        0
+        (1u64 << 44) - (1 << 16)
     }
 
     fn list(&mut self, path: &str) -> Result<Vec<DirEntry>> {
@@ -650,24 +983,39 @@ impl FileSystem for Ntfs {
         Ok(out)
     }
 
-    fn write_file(&mut self, _: &str, _: &mut dyn Read, _: u64, _: bool, _: Progress) -> Result<()> {
-        Err(Error::unsupported("writing to NTFS"))
+    fn write_file(&mut self, path: &str, src: &mut dyn Read, size: u64, overwrite: bool, progress: Progress) -> Result<()> {
+        self.w_write_file(path, src, size, overwrite, progress)
     }
 
-    fn mkdir(&mut self, _: &str) -> Result<()> {
-        Err(Error::unsupported("writing to NTFS"))
+    fn mkdir(&mut self, path: &str) -> Result<()> {
+        self.w_mkdir(path)
     }
 
-    fn remove(&mut self, _: &str) -> Result<()> {
-        Err(Error::unsupported("writing to NTFS"))
+    fn remove(&mut self, path: &str) -> Result<()> {
+        self.w_remove(path)
     }
 
-    fn rename(&mut self, _: &str, _: &str) -> Result<()> {
-        Err(Error::unsupported("writing to NTFS"))
+    fn rename(&mut self, path: &str, new_name: &str) -> Result<()> {
+        self.w_rename(path, new_name)
+    }
+
+    fn move_item(&mut self, path: &str, dest_dir: &str) -> Result<()> {
+        self.w_move(path, dest_dir)
     }
 
     fn flush(&mut self) -> Result<()> {
-        Ok(())
+        self.w_flush()
+    }
+
+    fn reserve(&mut self, start: u64, end: u64) {
+        self.w_reserve(start, end)
+    }
+
+    fn check(&mut self, repair: bool) -> Result<CheckReport> {
+        if repair {
+            return Err(Error::unsupported("repairing NTFS here (run chkdsk on Windows)"));
+        }
+        self.w_check()
     }
 }
 

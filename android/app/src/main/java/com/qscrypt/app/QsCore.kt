@@ -170,6 +170,8 @@ data class VolumeInfo(
     val fs: String,
     val label: String,
     val readOnly: Boolean,
+    /** Why a volume asked to be writable opened read-only (NTFS that Windows did not close cleanly...). */
+    val roReason: String,
     val total: Long,
     val free: Long,
     val maxFile: Long,
@@ -186,6 +188,7 @@ data class VolumeInfo(
             fs = j.optString("fs"),
             label = j.optString("label"),
             readOnly = j.optBoolean("readOnly"),
+            roReason = j.optString("roReason"),
             total = j.optLong("total"),
             free = j.optLong("free"),
             maxFile = j.optLong("maxFile"),
@@ -219,13 +222,32 @@ data class SelfTest(val ok: Boolean, val backend: String, val engine: String, va
     }
 }
 
+/** Why an NTFS volume opened read-only, in plain Arabic (empty when it was asked for). */
+fun readOnlyText(info: VolumeInfo): String {
+    val r = info.roReason
+    return when {
+        r.isEmpty() -> ""
+        r.contains("chkdsk") -> "ويندوز علّم هذا القرص للفحص، فيُفتح للقراءة فقط. على ويندوز: خصائص القرص ← أدوات ← «فحص» (أو chkdsk /f)، ثم افتحه هنا للكتابة."
+        r.contains("hibernated") -> "ويندوز في وضع السبات على هذا القرص، فيُفتح للقراءة فقط. شغّل ويندوز وأغلقه إغلاقاً كاملاً أولاً."
+        r.contains("did not close") -> "ويندوز لم يُغلق هذا القرص كاملاً (بدء التشغيل السريع، أو نزعه دون «إخراج»)، فيُفتح للقراءة فقط. أخرِجه من ويندوز بأمان، أو أغلق ويندوز مع الضغط على Shift، ثم أعد فتحه هنا."
+        r.contains("older than") -> "إصدار NTFS على هذا القرص قديم، فيُفتح للقراءة فقط."
+        r.contains("drive itself") -> "القرص نفسه محميّ من الكتابة."
+        else -> "يُفتح NTFS هذا للقراءة فقط: $r"
+    }
+}
+
 /** Engine error codes in plain Arabic. */
 fun errorText(code: String, message: String): String = when (code) {
     "wrong_password", "duress" -> "كلمة المرور أو الـ PIM أو ملفات المفاتيح غير صحيحة، أو أن الملف ليس حاوية مشفّرة."
     "hidden_protected" -> "مُنعت الكتابة لأنها كانت ستقع فوق المجلد المخفي. حماية المجلد المخفي تعمل، وكل كتابة أخرى موقوفة حتى تُغلق الخزنة."
     "policy" -> policyText(message)
     "unsupported" -> when {
-        message.contains("writing to NTFS") -> "حاويات NTFS تُفتح للقراءة فقط في هذا الإصدار. لتعديل الملفات استخدم VeraCrypt على الحاسوب، أو أنشئ حاوية exFAT."
+        message.contains("hard links") -> "لهذا الملف على NTFS أكثر من اسم (روابط صلبة)، فلا يُحذف أو يُنقل من هنا. افعل ذلك على ويندوز."
+        message.contains("reparse point") -> "هذا رابط ويندوز أو ملف سحابي غير منزَّل (OneDrive مثلاً)، ولا يُعدَّل من هنا. افعل ذلك على ويندوز."
+        message.contains("too fragmented") -> "المساحة الحرة على قرص NTFS هذا مجزّأة أكثر من اللازم لهذا الملف. شغّل «إلغاء التجزئة» على ويندوز أو احذف بعض الملفات."
+        message.contains("folder this large") || message.contains("record is full") -> "مجلد NTFS هذا كبير جداً ليُعدَّل من هنا. قسّمه إلى مجلدات أصغر على ويندوز."
+        message.contains("heavily fragmented NTFS") -> "هذا الملف مجزّأ جداً على NTFS، فلا يُعاد تسميته من هنا. انسخه باسم جديد ثم احذف القديم."
+        message.contains("repairing NTFS") -> "إصلاح NTFS يتم على ويندوز: افتح خصائص القرص ← أدوات ← «فحص»، أو شغّل chkdsk /f."
         message.contains("4 GB") || message.contains("files over") -> "نظام FAT لا يقبل ملفاً أكبر من 4GB. أنشئ الحاوية بنظام exFAT."
         message.contains("system encryption") -> "هذا قرص نظام مشفّر (قرص الإقلاع)، ولا يُفتح كحاوية."
         message.contains("TPM") -> "قرص BitLocker هذا يُفتح بشريحة TPM أو مفتاح بدء أو بطاقة ذكية فقط. استخدم مفتاح الاسترداد المكوّن من 48 رقماً."

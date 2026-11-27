@@ -98,7 +98,8 @@ fun VaultTools(session: Session, onJob: (Jobs.Job) -> Unit, onDismiss: () -> Uni
     var report by remember { mutableStateOf<org.json.JSONObject?>(null) }
     val tc = session.info.format == "TrueCrypt"
     val headers = session.info.format == "VeraCrypt" || session.info.format == "TrueCrypt"
-    val canRepair = !session.info.readOnly && !session.info.protected
+    val ntfs = session.info.fs == "NTFS"
+    val canRepair = !session.info.readOnly && !session.info.protected && !ntfs
 
     fun runCheck(repair: Boolean) {
         busy = true
@@ -249,7 +250,11 @@ fun VaultTools(session: Session, onJob: (Jobs.Job) -> Unit, onDismiss: () -> Uni
                                 }
                                 Gap(8.dp)
                                 Text(
-                                    if (canRepair) "الإصلاح آمن: يحرّر المساحة الضائعة ويصحّح العدّادات، ولا يحذف ملفاً سليماً. يُفضّل تصدير الملفات المهمة قبله." else "الخزنة مفتوحة للقراءة فقط أو المخفي محمي، فلا يمكن الإصلاح الآن.",
+                                    when {
+                                        canRepair -> "الإصلاح آمن: يحرّر المساحة الضائعة ويصحّح العدّادات، ولا يحذف ملفاً سليماً. يُفضّل تصدير الملفات المهمة قبله."
+                                        ntfs -> "إصلاح NTFS يتم على ويندوز: خصائص القرص ← أدوات ← «فحص»، أو chkdsk /f."
+                                        else -> "الخزنة مفتوحة للقراءة فقط أو المخفي محمي، فلا يمكن الإصلاح الآن."
+                                    },
                                     style = T.small,
                                 )
                             }

@@ -85,6 +85,7 @@ import com.qscrypt.app.Screen
 import com.qscrypt.app.Thumbs
 import com.qscrypt.app.Transfers
 import com.qscrypt.app.VolumeInfo
+import com.qscrypt.app.readOnlyText
 import com.qscrypt.app.humanSize
 import com.qscrypt.app.parseEntries
 import kotlinx.coroutines.Dispatchers
@@ -593,7 +594,7 @@ fun VaultScreen(handle: Long, path: String) {
                 Box(Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) {
                     Note(
                         when {
-                            info.fs == "NTFS" -> "NTFS يُفتح للقراءة فقط في هذا الإصدار. يمكنك عرض الملفات ونسخها وتصديرها."
+                            readOnlyText(info).isNotEmpty() -> readOnlyText(info) + " يمكنك الآن عرض الملفات ونسخها وتصديرها."
                             info.extra.optBoolean("eow") -> "قرص BitLocker مشفّر جزئياً (Encrypt used space only) يُفتح للقراءة فقط."
                             else -> "مفتوحة للقراءة فقط. يمكنك عرض الملفات ونسخها وتصديرها."
                         },

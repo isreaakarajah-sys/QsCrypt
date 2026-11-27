@@ -38,7 +38,7 @@ pub fn call(method: &str, c: &Call, progress: &mut dyn FnMut(u64, u64) -> bool) 
         "vault.check" => check(c, progress),
         "fs.move" => {
             let h = c.args.get("handle").i64_or(0);
-            api::with_vault(h, |v| {
+            api::changing(h, |v| {
                 api::check_pinned(v, c.args.get("path").str_or(""))?;
                 v.fs.move_item(c.args.get("path").str_or(""), c.args.get("dest").str_or("/")).map(|_| ok())
             })
@@ -307,7 +307,7 @@ fn put_blob(c: &Call) -> Result<String> {
     if path.is_empty() || path == "/" {
         return Err(Error::invalid("missing path"));
     }
-    api::with_vault(h, |v| {
+    api::changing(h, |v| {
         v.fs.write_file(&path, &mut &data[..], data.len() as u64, overwrite, &mut |_| true)?;
         Ok(Obj::new().bool("ok", true).uint("size", data.len() as u64).end())
     })
@@ -752,28 +752,34 @@ fn copy(c: &Call, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result<String> 
     }
     let mut done = 0u64;
     let (mut files, mut skipped) = (0u64, 0u64);
-    for (p, is_dir, size) in items {
-        let target = format!("{base}{}", &p[path.len()..]);
-        if is_dir {
-            match lock(&dst).fs.mkdir(&target) {
-                Ok(()) | Err(Error::AlreadyExists) => {}
-                Err(e) => return Err(e),
+    let r = (|| -> Result<()> {
+        for (p, is_dir, size) in items {
+            let target = format!("{base}{}", &p[path.len()..]);
+            if is_dir {
+                match lock(&dst).fs.mkdir(&target) {
+                    Ok(()) | Err(Error::AlreadyExists) => {}
+                    Err(e) => return Err(e),
+                }
+                continue;
             }
-            continue;
+            let start = done;
+            if !progress(start, total) {
+                return Err(Error::Cancelled);
+            }
+            let copied = copy_file(&src, &dst, same, &p, &target, size, existing, &spool_dir, &mut |n| progress(start + n, total))?;
+            if copied {
+                files += 1;
+            } else {
+                skipped += 1;
+            }
+            done += size;
         }
-        let start = done;
-        if !progress(start, total) {
-            return Err(Error::Cancelled);
-        }
-        let copied = copy_file(&src, &dst, same, &p, &target, size, existing, &spool_dir, &mut |n| progress(start + n, total))?;
-        if copied {
-            files += 1;
-        } else {
-            skipped += 1;
-        }
-        done += size;
-    }
-    lock(&dst).fs.flush()?;
+        Ok(())
+    })();
+    // Flushed even when stopped part-way: what was copied stays complete.
+    let flushed = lock(&dst).fs.flush();
+    r?;
+    flushed?;
     progress(total, total);
     Ok(Obj::new().bool("ok", true).uint("files", files).uint("skipped", skipped).uint("bytes", done).str("path", &base).end())
 }
