@@ -41,6 +41,7 @@
 
 - [وثيقة المتطلبات](docs/REQUIREMENTS.md)
 - [سجل التقدم](docs/PROGRESS.md)
+- [البناء من السورس والإصدار](docs/BUILD.md)
 
 ## بنية المستودع
 
