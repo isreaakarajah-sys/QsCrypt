@@ -31,6 +31,21 @@ pub(crate) struct Vault {
     pub protected: bool,
     /// Policy facts the app needs after opening (QsCrypt containers).
     pub extra: String,
+    /// Files of this volume opened as containers themselves (lower case):
+    /// they cannot be removed, renamed or replaced while open.
+    pub pinned: std::collections::HashSet<String>,
+    /// A plain partition opened from a USB drive: (drive, start, size), so a
+    /// container stored in it can reach the drive directly.
+    pub origin: Option<(i64, u64, u64)>,
+}
+
+/// Refuses changes to a file (or a folder holding one) opened as a container.
+pub(crate) fn check_pinned(v: &Vault, path: &str) -> Result<(), Error> {
+    let p = path.trim_end_matches('/').to_lowercase();
+    if v.pinned.iter().any(|x| *x == p || x.starts_with(&format!("{p}/"))) {
+        return Err(Error::invalid("this file is open as a container; close it first"));
+    }
+    Ok(())
 }
 
 pub(crate) fn register(v: Vault) -> (i64, String) {
@@ -168,6 +183,8 @@ pub fn open_volume(fd: i32, password: &[u8], pim: u32, prf: u32, format: i32, re
         let volume = vc::EncVolume::new(Box::new(disk), chain, found.header.data_offset, found.header.data_size, read_only)?;
         let fs = fs::mount(Box::new(volume), read_only, tz_minutes)?;
         let v = Vault {
+            pinned: Default::default(),
+            origin: None,
             fs,
             kind: found.header.format.name().into(),
             cipher: found.ea.name().into(),
@@ -255,6 +272,9 @@ pub fn import_file(handle: i64, in_fd: i32, size: u64, dest: &str, overwrite: bo
         if size > v.fs.max_file_size() {
             return Err(Error::unsupported(format!("files over {} bytes on {}", v.fs.max_file_size(), v.fs.kind())));
         }
+        if overwrite {
+            check_pinned(v, dest)?;
+        }
         let mut src = BufReader::with_capacity(1 << 20, file_from_fd(in_fd)?);
         v.fs.write_file(dest, &mut src, size, overwrite, &mut |d| progress(d, size))?;
         Ok(ok())
@@ -266,11 +286,17 @@ pub fn mkdir(handle: i64, path: &str) -> String {
 }
 
 pub fn remove(handle: i64, path: &str) -> String {
-    reply(with_vault(handle, |v| v.fs.remove(path).map(|_| ok())))
+    reply(with_vault(handle, |v| {
+        check_pinned(v, path)?;
+        v.fs.remove(path).map(|_| ok())
+    }))
 }
 
 pub fn rename(handle: i64, path: &str, new_name: &str) -> String {
-    reply(with_vault(handle, |v| v.fs.rename(path, new_name).map(|_| ok())))
+    reply(with_vault(handle, |v| {
+        check_pinned(v, path)?;
+        v.fs.rename(path, new_name).map(|_| ok())
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]

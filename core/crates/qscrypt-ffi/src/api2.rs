@@ -114,12 +114,12 @@ pub fn call_bytes(method: &str, args: &str, blobs: &[Secret], fds: &[i32]) -> Op
 
 // ---------------------------------------------------------------- sources
 
-struct Usb {
-    disk: SharedDisk,
-    info: DriveInfo,
+pub(crate) struct Usb {
+    pub(crate) disk: SharedDisk,
+    pub(crate) info: DriveInfo,
 }
 
-fn usb() -> &'static Mutex<HashMap<i64, Usb>> {
+pub(crate) fn usb() -> &'static Mutex<HashMap<i64, Usb>> {
     static U: OnceLock<Mutex<HashMap<i64, Usb>>> = OnceLock::new();
     U.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -130,6 +130,10 @@ static NEXT_USB: AtomicI64 = AtomicI64::new(1);
 /// partition of it). Returns it with the effective read-only flag.
 pub(crate) fn source(c: &Call, want_read_only: bool) -> Result<(Box<dyn Disk>, bool)> {
     let s = c.args.get("src");
+    // A container stored as a file inside an opened plain USB partition.
+    if let Some(outer) = s.get("inside").get("handle").as_i64() {
+        return crate::api3::nested_source(outer, s.get("inside").get("path").str_or(""), want_read_only);
+    }
     if let Some(h) = s.get("usb").as_i64() {
         let reg = usb().lock().unwrap_or_else(|e| e.into_inner());
         let dev = reg.get(&h).ok_or_else(|| Error::invalid("the USB drive was disconnected"))?;
@@ -342,6 +346,8 @@ fn open_veracrypt(c: &Call, mut disk: Box<dyn Disk>, ro: bool, tz: i32) -> Resul
         f.reserve(a, b);
     }
     let v = Vault {
+        pinned: Default::default(),
+        origin: None,
         fs: f,
         kind: found.header.format.name().into(),
         cipher: found.ea.name().into(),
@@ -370,6 +376,8 @@ fn open_bitlocker(c: &Call, disk: Box<dyn Disk>, ro: bool, tz: i32) -> Result<St
         f.reserve(a, b);
     }
     let v = Vault {
+        pinned: Default::default(),
+        origin: None,
         fs: f,
         kind: "BitLocker".into(),
         cipher: info.method.name().into(),
@@ -439,7 +447,7 @@ fn open_qvol(c: &Call, mut disk: Box<dyn Disk>, ro: bool, tz: i32) -> Result<Str
             extra = extra.str("fileKey", &hex(k));
         }
     }
-    let v = Vault { fs: f, kind: "QsCrypt".into(), cipher: "AES-Twofish-Serpent".into(), prf: "Argon2id".into(), hidden: false, protected: false, extra: extra.end() };
+    let v = Vault { pinned: Default::default(), origin: None, fs: f, kind: "QsCrypt".into(), cipher: "AES-Twofish-Serpent".into(), prf: "Argon2id".into(), hidden: false, protected: false, extra: extra.end() };
     Ok(register(v).1)
 }
 

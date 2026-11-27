@@ -8,6 +8,8 @@
 use crate::api::{self, backend, file_from_fd, ok, register, Vault};
 use crate::api2::{self, Call};
 use qscrypt_core::crypto::Prf;
+use qscrypt_core::disk::Disk;
+use qscrypt_core::part::DiskView;
 use qscrypt_core::disguise;
 use qscrypt_core::fs::{self, CheckReport, FileSystem};
 use qscrypt_core::identity::PublicIdentity;
@@ -36,7 +38,10 @@ pub fn call(method: &str, c: &Call, progress: &mut dyn FnMut(u64, u64) -> bool) 
         "vault.check" => check(c, progress),
         "fs.move" => {
             let h = c.args.get("handle").i64_or(0);
-            api::with_vault(h, |v| v.fs.move_item(c.args.get("path").str_or(""), c.args.get("dest").str_or("/")).map(|_| ok()))
+            api::with_vault(h, |v| {
+                api::check_pinned(v, c.args.get("path").str_or(""))?;
+                v.fs.move_item(c.args.get("path").str_or(""), c.args.get("dest").str_or("/")).map(|_| ok())
+            })
         }
         "fs.copy" => copy(c, progress),
         "fs.tree" => tree(c),
@@ -117,8 +122,126 @@ fn open_plain(c: &Call) -> Result<String> {
     let tz = c.args.get("tz").i64_or(0) as i32;
     let (disk, ro) = api2::source(c, want_ro)?;
     let f = fs::mount(disk, ro, tz)?;
-    let v = Vault { kind: "Plain".into(), cipher: String::new(), prf: String::new(), hidden: false, protected: false, extra: "{}".into(), fs: f };
+    let src = c.args.get("src");
+    let origin = src.get("usb").as_i64().map(|h| (h, src.get("start").u64_or(0), src.get("size").u64_or(0)));
+    let v = Vault { kind: "Plain".into(), cipher: String::new(), prf: String::new(), hidden: false, protected: false, extra: "{}".into(), fs: f, pinned: Default::default(), origin };
     Ok(register(v).1)
+}
+
+// ------------------------------------------------------------ containers inside a partition
+
+/// A volume stored as a file inside an opened plain USB partition (a
+/// VeraCrypt container or BitLocker VHD on a stick's FAT, exFAT or NTFS
+/// partition). Its bytes are the file's own clusters, read and written in
+/// place on the drive; the partition's file system records never change.
+/// The drive is reached directly (not through the partition's lock), so
+/// copying between the partition and the container cannot deadlock. The file
+/// stays pinned in the partition until this volume closes.
+pub(crate) struct NestedDisk {
+    disk: Box<dyn Disk>,
+    /// (offset in the file, offset in the partition, length), in file order.
+    map: Vec<(u64, u64, u64)>,
+    len: u64,
+    read_only: bool,
+    outer: i64,
+    key: String,
+}
+
+impl NestedDisk {
+    /// (partition offset, buffer offset, length) pieces of a file range.
+    fn pieces(&self, offset: u64, len: usize) -> Result<Vec<(u64, usize, usize)>> {
+        let end = offset.checked_add(len as u64).filter(|e| *e <= self.len).ok_or_else(|| Error::invalid("beyond the end of the container"))?;
+        let mut i = self.map.partition_point(|&(fo, _, l)| fo + l <= offset);
+        let mut pos = offset;
+        let mut out = Vec::new();
+        while pos < end {
+            let &(fo, vo, l) = self.map.get(i).ok_or_else(|| Error::corrupt("container map ends early"))?;
+            let take = (fo + l).min(end) - pos;
+            out.push((vo + (pos - fo), (pos - offset) as usize, take as usize));
+            pos += take;
+            i += 1;
+        }
+        Ok(out)
+    }
+}
+
+impl Disk for NestedDisk {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        for (vo, bo, n) in self.pieces(offset, buf.len())? {
+            self.disk.read_at(vo, &mut buf[bo..bo + n])?;
+        }
+        Ok(())
+    }
+
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<()> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+        for (vo, bo, n) in self.pieces(offset, buf.len())? {
+            self.disk.write_at(vo, &buf[bo..bo + n])?;
+        }
+        Ok(())
+    }
+
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.disk.flush()
+    }
+
+    fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+}
+
+impl Drop for NestedDisk {
+    fn drop(&mut self) {
+        let key = std::mem::take(&mut self.key);
+        let _ = api::with_vault(self.outer, |v| {
+            v.pinned.remove(&key);
+            Ok(())
+        });
+    }
+}
+
+/// The disk of `"src": {"inside": {"handle": partition, "path": "/x.hc"}}`.
+pub(crate) fn nested_source(outer: i64, path: &str, want_read_only: bool) -> Result<(Box<dyn Disk>, bool)> {
+    let key = path.trim_end_matches('/').to_lowercase();
+    let (map, len, origin) = api::with_vault(outer, |v| {
+        let origin = v.origin.ok_or_else(|| Error::unsupported("containers inside this kind of volume (only plain USB partitions)"))?;
+        let st = v.fs.stat(path)?;
+        if st.is_dir {
+            return Err(Error::invalid("a folder is not a container"));
+        }
+        if v.pinned.contains(&key) {
+            return Err(Error::invalid("this container is already open"));
+        }
+        let mut map = Vec::new();
+        let mut fo = 0u64;
+        for (vo, l) in v.fs.extents(path)? {
+            map.push((fo, vo, l));
+            fo += l;
+        }
+        if fo != st.size || st.size < 512 {
+            return Err(Error::corrupt("the file's clusters do not match its size"));
+        }
+        Ok((map, st.size, origin))
+    })?;
+    let (usb_handle, start, size) = origin;
+    let view = {
+        let reg = api2::usb().lock().unwrap_or_else(|e| e.into_inner());
+        let dev = reg.get(&usb_handle).ok_or_else(|| Error::invalid("the USB drive was disconnected"))?;
+        let ro = want_read_only || dev.info.write_protected;
+        (DiskView::new(dev.disk.clone(), start, size, ro)?, ro)
+    };
+    let read_only = view.1;
+    api::with_vault(outer, |v| {
+        v.pinned.insert(key.clone());
+        Ok(())
+    })?;
+    Ok((Box::new(NestedDisk { disk: Box::new(view.0), map, len, read_only, outer, key }), read_only))
 }
 
 // ------------------------------------------------------------ free space
@@ -994,6 +1117,62 @@ mod tests {
         let back = api2::call_bytes("backup.open", "{\"password\":0,\"data\":1}", &[Secret::from_slice(b"backup pass"), Secret::from_slice(&sealed)], &[]).expect("opened");
         assert_eq!(back, b"{\"qscryptBackup\":1}");
         assert!(api2::call_bytes("backup.open", "{\"password\":0,\"data\":1}", &[Secret::from_slice(b"wrong"), Secret::from_slice(&sealed)], &[]).is_none());
+    }
+
+    #[test]
+    fn containers_open_inside_a_plain_usb_partition() {
+        use qscrypt_core::disk::MemDisk;
+        use qscrypt_core::fs::FsChoice;
+        use qscrypt_core::usb::DriveInfo;
+        // A 40 MiB "USB stick" with a plain FAT partition from byte 1 MiB.
+        let size = 40u64 << 20;
+        let (start, part) = (1u64 << 20, 39u64 << 20);
+        let mut mem = MemDisk::new(size as usize);
+        for (off, bytes) in FsChoice::Fat.plan(part, "STICK", 7).unwrap().patches {
+            let o = (start + off) as usize;
+            mem.data[o..o + bytes.len()].copy_from_slice(&bytes);
+        }
+        let info = DriveInfo { vendor: "T".into(), product: "Stick".into(), revision: "1".into(), block_size: 512, blocks: size / 512, write_protected: false, removable: true };
+        api2::usb().lock().unwrap().insert(9001, api2::Usb { disk: Arc::new(Mutex::new(Box::new(mem))), info });
+        let r = api2::call("volume.openPlain", &format!("{{\"src\":{{\"usb\":9001,\"start\":{start},\"size\":{part}}}}}"), &[], &[], &mut |_, _| true);
+        assert!(r.contains("\"ok\":true"), "{r}");
+        let stick = handle(&r);
+
+        // A VeraCrypt container made on the side, then copied onto the stick.
+        let (p, h) = volume("nested.hc", 12, "fat");
+        put(h, "/inside.txt", b"hello from inside");
+        api::close_volume(h);
+        let f = File::open(&p).unwrap();
+        let len = f.metadata().unwrap().len();
+        let r = api::import_file(stick, f.as_raw_fd(), len, "/Backup.hc", false, &mut |_, _| true);
+        assert!(r.contains("\"ok\":true"), "{r}");
+
+        // Opened from inside the partition, written to, closed, opened again.
+        let pw = [Secret::from_slice(b"pw")];
+        let open = format!("{{\"src\":{{\"inside\":{{\"handle\":{stick},\"path\":\"/Backup.hc\"}}}},\"password\":0}}");
+        let r = api2::call("volume.open", &open, &pw, &[], &mut |_, _| true);
+        assert!(r.contains("\"ok\":true"), "{r}");
+        let inner = handle(&r);
+        assert_eq!(get(inner, "/inside.txt"), b"hello from inside");
+        put(inner, "/new.bin", &pattern(300_000, 3));
+        // While open, the file cannot be removed from the stick.
+        assert!(!api::remove(stick, "/Backup.hc").contains("\"ok\":true"));
+        // Copying from the stick into the container (two locks) does not deadlock.
+        put(stick, "/photo.jpg", &pattern(200_000, 9));
+        let r = api2::call("fs.copy", &format!("{{\"from\":{stick},\"path\":\"/photo.jpg\",\"to\":{inner},\"dest\":\"/\"}}"), &[], &[], &mut |_, _| true);
+        assert!(r.contains("\"ok\":true"), "{r}");
+        api::close_volume(inner);
+        let r = api2::call("volume.open", &open, &pw, &[], &mut |_, _| true);
+        assert!(r.contains("\"ok\":true"), "{r}");
+        let again = handle(&r);
+        assert_eq!(get(again, "/new.bin"), pattern(300_000, 3));
+        assert_eq!(get(again, "/photo.jpg"), pattern(200_000, 9));
+        api::close_volume(again);
+        // Closed: the stick lets it go.
+        assert!(api::remove(stick, "/Backup.hc").contains("\"ok\":true"));
+        api::close_volume(stick);
+        api2::usb().lock().unwrap().remove(&9001);
+        let _ = std::fs::remove_file(p);
     }
 
     #[test]

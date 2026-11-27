@@ -46,6 +46,7 @@ import com.qscrypt.app.Call
 import com.qscrypt.app.Container
 import com.qscrypt.app.FileKeys
 import com.qscrypt.app.Identity
+import com.qscrypt.app.Inside
 import com.qscrypt.app.Prefs
 import com.qscrypt.app.R
 import com.qscrypt.app.Reply
@@ -72,6 +73,10 @@ fun tzMinutes() = TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 
  */
 fun <T> withSource(context: Context, container: Container, usb: UsbTarget?, writable: Boolean, block: (Call.() -> Call) -> T): T? {
     if (usb != null) return block { srcUsb(usb) }
+    Inside.of(container)?.let { (_, path) ->
+        val outer = Inside.outer(container) ?: return null
+        return block { srcInside(outer.handle, path) }
+    }
     val uri = Uri.parse(container.uri)
     val rw = if (writable) Saf.open(context, uri, "rw") else null
     val pfd = rw ?: Saf.open(context, uri, "r") ?: return null
@@ -81,6 +86,7 @@ fun <T> withSource(context: Context, container: Container, usb: UsbTarget?, writ
 /** Makes a QsCrypt file or container undecryptable (policy enforcement). */
 fun destroyQsCrypt(context: Context, container: Container, usb: UsbTarget?): Boolean {
     if (usb != null) return Call("qsc.destroy").srcUsb(usb).run().ok
+    if (Inside.of(container) != null) return withSource(context, container, null, true) { s -> Call("qsc.destroy").s().run().ok } ?: false
     val pfd = Saf.open(context, Uri.parse(container.uri), "rw") ?: return false
     return pfd.use { Call("qsc.destroy").fd("fd", it.fd).run().ok }
 }
@@ -111,7 +117,8 @@ fun UnlockScreen(container: Container, usb: UsbTarget? = null) {
     var qsMode by remember { mutableStateOf("password") }
     var fileId by remember { mutableStateOf("") }
     var hasRecipients by remember { mutableStateOf(false) }
-    val uri = remember(container.uri) { if (usb == null) Uri.parse(container.uri) else null }
+    val inside = remember(container.uri) { Inside.of(container) }
+    val uri = remember(container.uri) { if (usb == null && inside == null) Uri.parse(container.uri) else null }
     val hasIdentity = remember { Identity.exists(context) }
     val activity = context as? FragmentActivity
     // Favourites: the password sealed by a fingerprint-bound hardware key.
@@ -163,7 +170,7 @@ fun UnlockScreen(container: Container, usb: UsbTarget? = null) {
         hiddenPassword = ""
         info.extra.optString("fileKey").takeIf { it.isNotEmpty() && fileId.isNotEmpty() }?.let { FileKeys.put(context, fileId, it) }
         if (fileId.isNotEmpty()) Prefs.setAttempts(fileId, 0)
-        val c = if (usb == null) {
+        val c = if (usb == null && inside == null) {
             AppState.updateContainer(container.copy(format = info.format, ea = info.ea, fs = info.fs))
             AppState.containers.firstOrNull { it.uri == container.uri } ?: container
         } else {
@@ -271,7 +278,14 @@ fun UnlockScreen(container: Container, usb: UsbTarget? = null) {
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Text(container.name, style = T.itemLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(if (uri != null) Saf.location(uri) else usb?.title.orEmpty(), style = T.small, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        when {
+                            uri != null -> Saf.location(uri)
+                            inside != null -> "داخل «${Inside.outer(container)?.container?.name ?: "القرص"}» · ${inside.second}"
+                            else -> usb?.title.orEmpty()
+                        },
+                        style = T.small, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Text(humanSize(container.size), style = T.mono.copy(fontSize = 12.sp))

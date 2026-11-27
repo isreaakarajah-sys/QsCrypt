@@ -1162,6 +1162,10 @@ impl FileSystem for Fat {
         self.disk.flush()
     }
 
+    fn raw_disk(&mut self) -> Option<&mut (dyn Disk + 'static)> {
+        Some(&mut *self.disk)
+    }
+
     fn extents(&mut self, path: &str) -> Result<Vec<(u64, u64)>> {
         let (_, it) = self.resolve_item(path)?;
         if it.first_cluster == 0 {

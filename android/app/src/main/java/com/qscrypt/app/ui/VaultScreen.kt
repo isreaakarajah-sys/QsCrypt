@@ -39,6 +39,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -65,6 +67,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qscrypt.app.AppState
+import com.qscrypt.app.Inside
+import com.qscrypt.app.Container
 import com.qscrypt.app.Call
 import com.qscrypt.app.Clip
 import com.qscrypt.app.Entry
@@ -259,10 +263,16 @@ fun VaultScreen(handle: Long, path: String) {
         }
     }
 
+    fun openAsContainer(dir: String, e: Entry) {
+        val p = childPath(dir, e.name)
+        AppState.push(Screen.Unlock(Container(Inside.uri(session, p), e.name, e.size, System.currentTimeMillis())))
+    }
+
     fun openAt(dir: String, e: Entry) {
         val p = childPath(dir, e.name)
         when {
             e.dir -> AppState.push(Screen.Vault(handle, p))
+            Inside.possible(session) && ext(e.name) in Inside.EXTENSIONS -> openAsContainer(dir, e)
             isImage(e.name) -> AppState.push(Screen.Gallery(handle, dir, e.name))
             isVideo(e.name) || isAudio(e.name) -> AppState.push(Screen.Media(handle, p, e.name, e.size))
             isPdf(e.name) -> AppState.push(Screen.Pdf(handle, p, e.name, e.size))
@@ -652,16 +662,38 @@ fun VaultScreen(handle: Long, path: String) {
         )
     }
     cannotView?.let { e ->
-        QsAlert(
-            title = e.name,
-            text = "لا يُعرض هذا النوع داخل التطبيق. يمكنك تصديره وفتحه بتطبيق آخر، علماً أن النسخة المصدّرة تكون غير مشفّرة.",
-            confirm = "تصدير",
-            onConfirm = {
-                cannotView = null
-                export(e)
-            },
-            onDismiss = { cannotView = null },
-        )
+        if (Inside.possible(session)) {
+            // On a plain USB partition the file may be a container (any name).
+            AlertDialog(
+                onDismissRequest = { cannotView = null },
+                containerColor = Qs.surface,
+                title = { Text(e.name, style = T.title) },
+                text = { Text("إن كان حاوية VeraCrypt أو BitLocker فافتحه هنا مباشرة، أو صدّره لتفتحه بتطبيق آخر (النسخة المصدّرة غير مشفّرة).", style = T.body.copy(color = Qs.muted)) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        cannotView = null
+                        openAsContainer(path, e)
+                    }) { Text("افتح كحاوية", style = T.button.copy(color = Qs.brass, fontSize = 15.sp)) }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        cannotView = null
+                        export(e)
+                    }) { Text("تصدير", style = T.button.copy(color = Qs.muted, fontSize = 15.sp)) }
+                },
+            )
+        } else {
+            QsAlert(
+                title = e.name,
+                text = "لا يُعرض هذا النوع داخل التطبيق. يمكنك تصديره وفتحه بتطبيق آخر، علماً أن النسخة المصدّرة تكون غير مشفّرة.",
+                confirm = "تصدير",
+                onConfirm = {
+                    cannotView = null
+                    export(e)
+                },
+                onDismiss = { cannotView = null },
+            )
+        }
     }
     if (confirmClose) {
         QsAlert(

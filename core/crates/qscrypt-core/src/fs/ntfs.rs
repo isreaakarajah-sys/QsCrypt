@@ -605,6 +605,51 @@ impl FileSystem for Ntfs {
         Ok(n)
     }
 
+    fn raw_disk(&mut self) -> Option<&mut (dyn Disk + 'static)> {
+        Some(&mut *self.disk)
+    }
+
+    /// The clusters of a plain file (not resident, compressed, encrypted or
+    /// sparse), in order: what a container stored on NTFS needs.
+    fn extents(&mut self, path: &str) -> Result<Vec<(u64, u64)>> {
+        let (mut runs, size, init, flags) = match self.data_of(path)? {
+            Stream::Resident(_) => return Err(Error::unsupported("a small NTFS file kept inside its record")),
+            Stream::NonResident { runs, size, init, flags } => (runs, size, init, flags),
+        };
+        if flags & (FLAG_COMPRESSED | FLAG_ENCRYPTED) != 0 {
+            return Err(Error::unsupported("compressed or EFS-encrypted NTFS files"));
+        }
+        if init < size {
+            return Err(Error::unsupported("an NTFS file whose end was never written"));
+        }
+        runs.sort_by_key(|r| r.vcn);
+        let cs = self.cluster_size;
+        let mut out: Vec<(u64, u64)> = Vec::new();
+        let mut left = size;
+        let mut vcn = 0;
+        for r in runs {
+            if left == 0 {
+                break;
+            }
+            if r.vcn != vcn {
+                return Err(Error::corrupt("NTFS runs with a gap"));
+            }
+            let lcn = r.lcn.ok_or_else(|| Error::unsupported("sparse NTFS files"))?;
+            let off = lcn * cs;
+            let n = (r.len * cs).min(left);
+            match out.last_mut() {
+                Some((o, l)) if *o + *l == off => *l += n,
+                _ => out.push((off, n)),
+            }
+            left -= n;
+            vcn += r.len;
+        }
+        if left != 0 {
+            return Err(Error::corrupt("NTFS runs shorter than the file"));
+        }
+        Ok(out)
+    }
+
     fn write_file(&mut self, _: &str, _: &mut dyn Read, _: u64, _: bool, _: Progress) -> Result<()> {
         Err(Error::unsupported("writing to NTFS"))
     }

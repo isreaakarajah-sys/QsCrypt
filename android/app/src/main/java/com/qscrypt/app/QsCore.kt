@@ -1,5 +1,7 @@
 package com.qscrypt.app
 
+import android.net.Uri
+
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -83,6 +85,11 @@ class Call(private val method: String) {
         args.put("src", JSONObject().put("usb", t.handle).put("start", t.start).put("size", t.size))
     }
 
+    /** A container stored as a file inside an open plain USB partition. */
+    fun srcInside(outer: Long, path: String): Call = apply {
+        args.put("src", JSONObject().put("inside", JSONObject().put("handle", outer).put("path", path)))
+    }
+
     fun context(): Call = apply {
         val now = System.currentTimeMillis() / 1000
         Prefs.noteTime(now)
@@ -112,6 +119,36 @@ private val EXPECTED = setOf("wrong_password", "duress", "policy", "cancelled", 
 
 /** A USB drive opened by the engine, or one partition of it. */
 data class UsbTarget(val handle: Long, val start: Long, val size: Long, val title: String, val kind: String)
+
+/**
+ * Containers stored as files inside an open plain USB partition (a VeraCrypt
+ * volume or BitLocker VHD on a stick's FAT, exFAT or NTFS partition). Their
+ * [Container.uri] is "qsinside:<partition's stable key>|<path>": they open
+ * while that partition is open, and close with it.
+ */
+object Inside {
+    private const val SCHEME = "qsinside:"
+
+    /** File names opened as containers when tapped. */
+    val EXTENSIONS = setOf("hc", "tc", "vc", "vhd", "vhdx", "qsv", "bek")
+
+    fun uri(outer: Session, path: String): String = SCHEME + Uri.encode(outer.stableKey) + "|" + path
+
+    /** (the partition's stable key, path in it), or null for other containers. */
+    fun of(c: Container): Pair<String, String>? {
+        if (!c.uri.startsWith(SCHEME)) return null
+        val rest = c.uri.removePrefix(SCHEME)
+        val i = rest.indexOf('|')
+        if (i < 0) return null
+        return Uri.decode(rest.substring(0, i)) to rest.substring(i + 1)
+    }
+
+    /** The open partition session a nested container lives in. */
+    fun outer(c: Container): Session? = of(c)?.let { (key, _) -> AppState.sessions.firstOrNull { it.stableKey == key } }
+
+    /** Whether files of this session can be opened as containers (plain USB partitions). */
+    fun possible(s: Session): Boolean = s.plain && s.usb != null
+}
 
 /** A parsed engine reply: `{"ok":true,...}` or `{"ok":false,"code":...}`. */
 class Reply(raw: String) {

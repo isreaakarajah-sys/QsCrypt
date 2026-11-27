@@ -1195,6 +1195,10 @@ impl FileSystem for Exfat {
         self.disk.flush()
     }
 
+    fn raw_disk(&mut self) -> Option<&mut (dyn Disk + 'static)> {
+        Some(&mut *self.disk)
+    }
+
     fn extents(&mut self, path: &str) -> Result<Vec<(u64, u64)>> {
         let it = self.resolve_item(path)?;
         let clusters = self.clusters_of(&it.stream)?;

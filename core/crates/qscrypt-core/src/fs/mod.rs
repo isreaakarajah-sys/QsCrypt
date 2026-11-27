@@ -136,6 +136,14 @@ pub trait FileSystem: Send {
         Err(Error::unsupported("file extents on this file system"))
     }
 
+    /// The device under the file system. A container stored as a file in it
+    /// (a VeraCrypt volume on a USB stick's FAT, exFAT or NTFS partition) is
+    /// read and written in place through it, at the file's [extents]: only
+    /// the file's own clusters change, never the file system's records.
+    fn raw_disk(&mut self) -> Option<&mut (dyn Disk + 'static)> {
+        None
+    }
+
     /// Marks a file or directory hidden + system (as Windows does for
     /// "System Volume Information").
     fn set_hidden_system(&mut self, _path: &str) -> Result<()> {

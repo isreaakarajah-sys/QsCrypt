@@ -170,6 +170,8 @@ object AppState {
 
     /** Flushes and closes one vault (its jobs are cancelled first). */
     fun closeSession(handle: Long) {
+        // Containers opened from inside this partition close first.
+        sessions.filter { Inside.outer(it.container)?.handle == handle }.forEach { closeSession(it.handle) }
         Jobs.cancelFor(handle)
         QsCore.closeVolume(handle)
         sessions.removeAll { it.handle == handle }
