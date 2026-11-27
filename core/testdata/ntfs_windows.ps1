@@ -109,7 +109,7 @@ foreach ($d in Get-ChildItem -Path 'ntfs-out' -Filter '*.vhd' -ErrorAction Silen
         Check 'R' "$name after Windows and QsCrypt both wrote"
         Detach $d.FullName
     } catch {
-        Write-Host "FAIL $name: $_"
+        Write-Host "FAIL ${name}: $_"
         $script:fail = 1
         try { Detach $d.FullName } catch {}
     }

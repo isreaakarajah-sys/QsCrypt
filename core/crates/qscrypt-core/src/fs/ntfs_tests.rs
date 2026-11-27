@@ -353,3 +353,52 @@ fn ntfs_full_disk_is_a_clean_refusal() {
     clean(&mut fs, "after freeing");
     fs.flush().unwrap();
 }
+
+#[test]
+fn ntfs_folder_with_an_attribute_list() {
+    let d = fixture(MKNTFS_4K);
+    let mut fs = rw(&d);
+    fs.mkdir("/big").unwrap();
+    let mut model = BTreeMap::new();
+    for i in 0..300 {
+        let p = format!("/big/entry {i:03} with a name.txt");
+        let c = data(i * 3, i as u32);
+        put(&mut fs, &p, &c);
+        model.insert(p, Some(c));
+    }
+    let dir = fs.resolve("/big").unwrap();
+    let ext = test_move_index_out(&mut fs, dir.record).unwrap();
+    assert!(fs.read_rec_for_test(dir.record).contains(&AT_ATTRIBUTE_LIST));
+    clean(&mut fs, "moved out");
+    // Changes inside: the allocation is edited in the extension record.
+    for i in 300..700 {
+        let p = format!("/big/entry {i:03} with a name.txt");
+        let c = data(i % 90, i as u32);
+        put(&mut fs, &p, &c);
+        model.insert(p, Some(c));
+    }
+    for i in (0..700).step_by(2) {
+        let p = format!("/big/entry {i:03} with a name.txt");
+        fs.remove(&p).unwrap();
+        model.remove(&p);
+    }
+    fs.rename("/big/entry 001 with a name.txt", "renamed inside.txt").unwrap();
+    let v = model.remove("/big/entry 001 with a name.txt").unwrap();
+    model.insert("/big/renamed inside.txt".into(), v);
+    clean(&mut fs, "changed inside");
+    // The folder itself renamed: its attribute list follows.
+    fs.rename("/big", "a new name for the big folder").unwrap();
+    let mut got = BTreeMap::new();
+    tree(&mut fs, "/a new name for the big folder", &mut got);
+    let want: BTreeMap<String, Option<Vec<u8>>> = model.into_iter().map(|(k, v)| (format!("/a new name for the big folder{}", &k[4..]), v)).collect();
+    assert!(got == want, "contents differ");
+    clean(&mut fs, "folder renamed");
+    fs.flush().unwrap();
+    drop(fs);
+    let mut fs = rw(&d);
+    // Gone with its extension record.
+    fs.remove("/a new name for the big folder").unwrap();
+    assert!(!fs.st_for_test_rec_used(ext));
+    clean(&mut fs, "removed");
+    fs.flush().unwrap();
+}

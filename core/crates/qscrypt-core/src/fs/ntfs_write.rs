@@ -425,6 +425,59 @@ impl Rec {
     }
 }
 
+/// One entry of an $ATTRIBUTE_LIST: where an attribute of an item lives.
+#[derive(Clone, Debug)]
+struct ListEnt {
+    ty: u32,
+    name: Vec<u16>,
+    vcn: u64,
+    file_ref: u64,
+    inst: u16,
+}
+
+impl ListEnt {
+    fn record(&self) -> u64 {
+        self.file_ref & REF_MASK
+    }
+}
+
+fn parse_list(bytes: &[u8]) -> Vec<ListEnt> {
+    let mut out = Vec::new();
+    let mut p = 0;
+    while p + 26 <= bytes.len() {
+        let len = le16(bytes, p + 4) as usize;
+        if len < 26 || p + len > bytes.len() {
+            break;
+        }
+        let nl = bytes[p + 6] as usize;
+        let no = bytes[p + 7] as usize;
+        let name = (0..nl).filter(|i| p + no + 2 * i + 2 <= p + len).map(|i| le16(bytes, p + no + 2 * i)).collect();
+        out.push(ListEnt { ty: le32(bytes, p), name, vcn: le64(bytes, p + 8), file_ref: le64(bytes, p + 16), inst: le16(bytes, p + 24) });
+        p += len;
+    }
+    out
+}
+
+fn list_bytes(ents: &[ListEnt]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for e in ents {
+        let len = align8(0x1A + 2 * e.name.len());
+        let at = out.len();
+        out.resize(at + len, 0);
+        put_le32(&mut out, at, e.ty);
+        put_le16(&mut out, at + 4, len as u16);
+        out[at + 6] = e.name.len() as u8;
+        out[at + 7] = 0x1A;
+        put_le64(&mut out, at + 8, e.vcn);
+        put_le64(&mut out, at + 16, e.file_ref);
+        put_le16(&mut out, at + 24, e.inst);
+        for (i, u) in e.name.iter().enumerate() {
+            put_le16(&mut out, at + 0x1A + 2 * i, *u);
+        }
+    }
+    out
+}
+
 // -------------------------------------------------------------------- state
 
 enum MftBitmapAt {
@@ -743,6 +796,11 @@ struct Ix {
     /// Clusters taken for new index blocks since the last commit: given back
     /// when a change is abandoned before it is written.
     grown: Vec<(u64, u64)>,
+    /// The owner has an attribute list; its allocation and bitmap may then
+    /// live in extension records (these, when so).
+    listed: bool,
+    alloc_rec: Option<u64>,
+    bitmap_rec: Option<u64>,
 }
 
 impl Ix {
@@ -794,12 +852,14 @@ impl Ix {
         align8(0x18 + 2 * self.name.len()) + 32 + entries
     }
 
+    /// Bytes the allocation and bitmap take in the owner's base record.
     fn alloc_attr_len(&self) -> usize {
         if self.bytes == 0 {
-            0
-        } else {
-            nonresident_len(self.name.len(), &pairs(&self.runs)) + resident_len(self.name.len(), self.bitmap.len())
+            return 0;
         }
+        let a = if self.alloc_rec.is_none() { nonresident_len(self.name.len(), &pairs(&self.runs)) } else { 0 };
+        let b = if self.bitmap_rec.is_none() { resident_len(self.name.len(), self.bitmap.len()) } else { 0 };
+        a + b
     }
 
     fn new_node(&mut self, vcn: u64, ents: Vec<Ent>) {
@@ -1478,11 +1538,23 @@ impl Ntfs {
 
     // ------------------------------------------------------------ indexes
 
+    /// The attribute list of an item, if it has one.
+    fn attr_list(&mut self, r: &Rec) -> Result<Option<(Vec<ListEnt>, bool)>> {
+        let Some(lo) = r.find(AT_ATTRIBUTE_LIST, &[]) else { return Ok(None) };
+        if r.resident(lo) {
+            return Ok(Some((parse_list(r.value(lo)), true)));
+        }
+        let runs = r.runs(lo)?;
+        let size = le64(&r.b, lo + 0x30);
+        let mut v = vec![0u8; size as usize];
+        let cs = self.cluster_size;
+        runs_read(self.disk.as_mut(), cs, &runs, 0, &mut v)?;
+        Ok(Some((parse_list(&v), false)))
+    }
+
     fn load_ix(&mut self, rec: u64, name: &[u16]) -> Result<Ix> {
         let r = self.read_rec(rec)?;
-        if r.find(AT_ATTRIBUTE_LIST, &[]).is_some() {
-            return Err(Error::unsupported("changing a folder this large on NTFS (attribute list)"));
-        }
+        let list = self.attr_list(&r)?;
         let ro = r.find(AT_INDEX_ROOT, name).filter(|&o| r.resident(o)).ok_or(Error::NotADirectory)?;
         let v = r.value(ro).to_vec();
         if v.len() < 32 {
@@ -1495,25 +1567,61 @@ impl Ntfs {
         }
         let root = parse_node(&v, 16)?;
         let mut base_used = r.used() - le32(&r.b, ro + 4) as usize;
+        // Where the allocation and the bitmap live (an extension record,
+        // with an attribute list), each in one piece.
+        let (mut alloc_rec, mut bitmap_rec) = (None, None);
+        if let Some((ents, _)) = &list {
+            let at = |ty: u32| -> Result<Option<u64>> {
+                let found: Vec<&ListEnt> = ents.iter().filter(|e| e.ty == ty && e.name == name).collect();
+                if found.len() > 1 {
+                    return Err(Error::unsupported("changing a folder this large on NTFS (index in several pieces)"));
+                }
+                Ok(found.first().map(|e| e.record()).filter(|&n| n != rec))
+            };
+            alloc_rec = at(AT_INDEX_ALLOCATION)?;
+            bitmap_rec = at(AT_BITMAP)?;
+            if ents.iter().any(|e| e.ty == AT_INDEX_ROOT && e.name == name && e.record() != rec) {
+                return Err(Error::unsupported("changing a folder this large on NTFS (index root elsewhere)"));
+            }
+        }
+        let ar = match alloc_rec {
+            Some(n) => self.read_rec(n)?,
+            None => Rec { n: rec, b: r.b.clone() },
+        };
         let (mut runs, mut bytes) = (Vec::new(), 0);
-        if let Some(ao) = r.find(AT_INDEX_ALLOCATION, name) {
-            if r.resident(ao) {
+        if let Some(ao) = ar.find(AT_INDEX_ALLOCATION, name) {
+            if ar.resident(ao) {
                 return Err(Error::corrupt("resident NTFS index allocation"));
             }
-            runs = r.runs(ao)?;
-            bytes = le64(&r.b, ao + 0x30);
-            if le64(&r.b, ao + 0x38) < bytes || runs.iter().any(|r| r.lcn.is_none()) {
+            if le64(&ar.b, ao + 0x10) != 0 {
+                return Err(Error::unsupported("changing a folder this large on NTFS (index in several pieces)"));
+            }
+            runs = ar.runs(ao)?;
+            bytes = le64(&ar.b, ao + 0x30);
+            if le64(&ar.b, ao + 0x38) < bytes || runs.iter().any(|r| r.lcn.is_none()) {
                 return Err(Error::unsupported("an NTFS index with a sparse allocation"));
             }
-            base_used -= le32(&r.b, ao + 4) as usize;
+            if alloc_rec.is_none() {
+                base_used -= le32(&ar.b, ao + 4) as usize;
+            }
+        } else if alloc_rec.is_some() {
+            return Err(Error::corrupt("NTFS attribute list points to a missing index allocation"));
         }
+        let br = match bitmap_rec {
+            Some(n) => self.read_rec(n)?,
+            None => Rec { n: rec, b: r.b.clone() },
+        };
         let mut bitmap = Vec::new();
-        if let Some(bo) = r.find(AT_BITMAP, name) {
-            if !r.resident(bo) {
+        if let Some(bo) = br.find(AT_BITMAP, name) {
+            if !br.resident(bo) {
                 return Err(Error::unsupported("changing a folder this large on NTFS (index bitmap)"));
             }
-            bitmap = r.value(bo).to_vec();
-            base_used -= le32(&r.b, bo + 4) as usize;
+            bitmap = br.value(bo).to_vec();
+            if bitmap_rec.is_none() {
+                base_used -= le32(&br.b, bo + 4) as usize;
+            }
+        } else if bitmap_rec.is_some() {
+            return Err(Error::corrupt("NTFS attribute list points to a missing index bitmap"));
         }
         if bytes > 0 && (bitmap.len() as u64) * 8 < bytes / ibs {
             return Err(Error::corrupt("NTFS index bitmap too short"));
@@ -1535,6 +1643,9 @@ impl Ntfs {
             dirty: BTreeSet::new(),
             meta: false,
             grown: Vec::new(),
+            listed: list.is_some(),
+            alloc_rec,
+            bitmap_rec,
         })
     }
 
@@ -1563,6 +1674,9 @@ impl Ntfs {
 
     /// Adds index blocks (doubling, up to 256 at a time).
     fn ix_grow(&mut self, ix: &mut Ix) -> Result<()> {
+        if ix.listed && ix.bytes == 0 {
+            return Err(Error::unsupported("changing a folder this large on NTFS (attribute list)"));
+        }
         let cs = self.cluster_size;
         let blocks = ix.blocks();
         let add = blocks.clamp(1, 256);
@@ -1712,7 +1826,9 @@ impl Ntfs {
     /// would empty a node).
     fn ix_rebuild(&mut self, ix: &mut Ix, all: Vec<Ent>) -> Result<()> {
         let size = entries_size(&all) + 16;
-        let alone = ix.base_used + ix.root_attr_len(size) <= self.record_size;
+        // With an attribute list the allocation stays (taking it away would
+        // mean editing the list): the entries then go into blocks.
+        let alone = !ix.listed && ix.base_used + ix.root_attr_len(size) <= self.record_size;
         if alone {
             let runs = pairs(&ix.runs);
             self.release(&runs)?;
@@ -1849,26 +1965,43 @@ impl Ntfs {
     /// Writes changed blocks, then the owner record. The record is built and
     /// checked first, so a record that cannot hold the index changes nothing.
     fn ix_commit(&mut self, ix: &mut Ix) -> Result<()> {
-        let mut rec = None;
+        let mut recs: Vec<Rec> = Vec::new();
         if ix.meta {
             let mut r = self.read_rec(ix.rec)?;
             let ro = r.find(AT_INDEX_ROOT, &ix.name).ok_or_else(|| Error::corrupt("NTFS index root vanished"))?;
             r.replace(ro, resident(AT_INDEX_ROOT, &ix.name, &Self::root_value(ix), false))?;
             let alloc = (ix.bytes > 0).then(|| nonresident(AT_INDEX_ALLOCATION, &ix.name, &pairs(&ix.runs), ix.bytes, ix.bytes, ix.bytes));
-            match (r.find(AT_INDEX_ALLOCATION, &ix.name), alloc) {
-                (Some(o), Some(a)) => r.replace(o, a)?,
-                (Some(o), None) => r.remove(o),
-                (None, Some(a)) => r.insert(a, None)?,
-                (None, None) => {}
-            }
             let bitmap = (ix.bytes > 0).then(|| resident(AT_BITMAP, &ix.name, &ix.bitmap, false));
-            match (r.find(AT_BITMAP, &ix.name), bitmap) {
-                (Some(o), Some(a)) => r.replace(o, a)?,
-                (Some(o), None) => r.remove(o),
-                (None, Some(a)) => r.insert(a, None)?,
-                (None, None) => {}
+            let mut others: Vec<Rec> = Vec::new();
+            for (ty, attr, at) in [(AT_INDEX_ALLOCATION, alloc, ix.alloc_rec), (AT_BITMAP, bitmap, ix.bitmap_rec)] {
+                match at {
+                    // In an extension record: replaced there, in place.
+                    Some(n) => {
+                        let i = match others.iter().position(|o| o.n == n) {
+                            Some(i) => i,
+                            None => {
+                                others.push(self.read_rec(n)?);
+                                others.len() - 1
+                            }
+                        };
+                        let x = &mut others[i];
+                        let o = x.find(ty, &ix.name).ok_or_else(|| Error::corrupt("NTFS index attribute vanished"))?;
+                        match attr {
+                            Some(a) => x.replace(o, a)?,
+                            None => return Err(Error::unsupported("changing a folder this large on NTFS (attribute list)")),
+                        }
+                    }
+                    None => match (r.find(ty, &ix.name), attr) {
+                        (Some(o), Some(a)) => r.replace(o, a)?,
+                        (Some(o), None) if !ix.listed => r.remove(o),
+                        (None, Some(a)) if !ix.listed => r.insert(a, None)?,
+                        (None, None) => {}
+                        _ => return Err(Error::unsupported("changing a folder this large on NTFS (attribute list)")),
+                    },
+                }
             }
-            rec = Some(r);
+            recs.push(r);
+            recs.extend(others);
         }
         let cs = self.cluster_size;
         let dirty: Vec<u64> = std::mem::take(&mut ix.dirty).into_iter().collect();
@@ -1882,10 +2015,11 @@ impl Ntfs {
             ix.nodes.get_mut(&vcn).unwrap().usn = usn;
             ix.usns.insert(vcn, usn);
         }
-        if let Some(r) = rec {
-            self.write_rec(&r)?;
-            ix.meta = false;
+        // Extension records first: the base record is what points at them.
+        for r in recs.iter().rev() {
+            self.write_rec(r)?;
         }
+        ix.meta = false;
         ix.grown.clear();
         Ok(())
     }
@@ -2261,9 +2395,11 @@ impl Ntfs {
         Ok(true)
     }
 
-    /// The record with `fnv` as its only name in `from`'s place.
+    /// The record with `fnv` as its only name in `from`'s place; an attribute
+    /// list (resident) follows: entries of the old names out, the new one in.
     fn renamed(rec: &Rec, mine: &[usize], fnv: &[u8]) -> Result<Rec> {
         let mut r = Rec { n: rec.n, b: rec.b.clone() };
+        let gone: Vec<u16> = mine.iter().map(|&o| le16(&rec.b, o + 14)).collect();
         let mut offs = mine.to_vec();
         offs.sort_unstable_by(|a, b| b.cmp(a));
         for o in offs {
@@ -2271,6 +2407,17 @@ impl Ntfs {
         }
         r.insert(resident(AT_FILE_NAME, &[], fnv, true), None)?;
         put_le16(&mut r.b, 18, 1);
+        if let Some(lo) = r.find(AT_ATTRIBUTE_LIST, &[]) {
+            if !r.resident(lo) {
+                return Err(Error::unsupported("renaming a heavily fragmented NTFS file (attribute list)"));
+            }
+            let inst = r.all(AT_FILE_NAME).into_iter().map(|o| le16(&r.b, o + 14)).max().unwrap_or(0);
+            let base = rec.n;
+            let mut ents: Vec<ListEnt> = parse_list(r.value(lo)).into_iter().filter(|e| !(e.ty == AT_FILE_NAME && e.record() == base && gone.contains(&e.inst))).collect();
+            let at = ents.iter().position(|e| e.ty > AT_FILE_NAME).unwrap_or(ents.len());
+            ents.insert(at, ListEnt { ty: AT_FILE_NAME, name: Vec::new(), vcn: 0, file_ref: base | (rec.seq() as u64) << 48, inst });
+            r.replace(lo, resident(AT_ATTRIBUTE_LIST, &[], &list_bytes(&ents), false))?;
+        }
         Ok(r)
     }
 
@@ -2278,8 +2425,12 @@ impl Ntfs {
     fn relink(&mut self, it: &Item, from: &Item, to: &Item, new_name: Option<&str>) -> Result<()> {
         let rec = self.read_rec(it.record)?;
         self.check_deletable(&rec)?;
-        if rec.find(AT_ATTRIBUTE_LIST, &[]).is_some() {
-            return Err(Error::unsupported("renaming a heavily fragmented NTFS file (attribute list)"));
+        if let Some((ents, resident)) = self.attr_list(&rec)? {
+            // Names kept in extension records, or a list too long to stay in
+            // the record, are left to Windows.
+            if !resident || ents.iter().any(|e| e.ty == AT_FILE_NAME && e.record() != rec.n) {
+                return Err(Error::unsupported("renaming a heavily fragmented NTFS file (attribute list)"));
+            }
         }
         self.begin()?;
         let r = self.relink_in(rec, it, from, to, new_name);
@@ -2800,4 +2951,53 @@ pub(super) fn test_add_object_id(fs: &mut Ntfs, record: u64, seq: u16, objid: u6
 pub(super) fn test_has_object_id(fs: &mut Ntfs, objid: u64, oid: &[u8]) -> Result<bool> {
     let mut ix = fs.load_ix(objid, &O_NAME)?;
     Ok(fs.ix_all(&mut ix)?.iter().any(|e| e.key() == oid))
+}
+
+/// Moves a folder's $INDEX_ALLOCATION and $BITMAP into an extension record
+/// behind an attribute list, as Windows does when a folder's record fills.
+#[cfg(test)]
+pub(super) fn test_move_index_out(fs: &mut Ntfs, dir: u64) -> Result<u64> {
+    fs.begin()?;
+    let mut base = fs.read_rec(dir)?;
+    let base_ref = dir | (base.seq() as u64) << 48;
+    let (n, seq) = fs.alloc_record()?;
+    let mut ext = Rec::fresh(n, fs.record_size, seq, REC_IN_USE);
+    put_le64(&mut ext.b, 32, base_ref);
+    let mut ents: Vec<ListEnt> = base
+        .attrs()
+        .into_iter()
+        .map(|(o, _)| ListEnt { ty: base.ty(o), name: base.name(o), vcn: if base.resident(o) { 0 } else { le64(&base.b, o + 0x10) }, file_ref: base_ref, inst: le16(&base.b, o + 14) })
+        .collect();
+    let mut top = 0;
+    for ty in [AT_INDEX_ALLOCATION, AT_BITMAP] {
+        let o = base.find(ty, &I30_NAME).ok_or(Error::NotFound)?;
+        let len = le32(&base.b, o + 4) as usize;
+        let bytes = base.b[o..o + len].to_vec();
+        let inst = le16(&bytes, 14);
+        base.remove(o);
+        ext.insert(bytes, Some(inst))?;
+        top = top.max(inst + 1);
+        for e in ents.iter_mut().filter(|e| e.ty == ty) {
+            e.file_ref = n | (seq as u64) << 48;
+        }
+    }
+    put_le16(&mut ext.b, 40, top);
+    base.insert(resident(AT_ATTRIBUTE_LIST, &[], &list_bytes(&ents), false), None)?;
+    fs.write_rec(&ext)?;
+    fs.write_rec(&base)?;
+    fs.finish()?;
+    Ok(n)
+}
+
+#[cfg(test)]
+impl Ntfs {
+    /// Attribute types of a record.
+    pub(super) fn read_rec_for_test(&mut self, n: u64) -> Vec<u32> {
+        let r = self.read_rec(n).unwrap();
+        r.attrs().into_iter().map(|(o, _)| r.ty(o)).collect()
+    }
+
+    pub(super) fn st_for_test_rec_used(&mut self, n: u64) -> bool {
+        self.st().unwrap().rec_used(n)
+    }
 }
