@@ -605,6 +605,10 @@ fun VaultScreen(handle: Long, path: String) {
                                 AppState.pickerOpen = true
                                 folderImporter.launch(null)
                             })
+                            DropdownMenuItem(text = { Text("الكاميرا الآمنة", style = T.item) }, onClick = {
+                                addMenu = false
+                                AppState.push(Screen.Camera(handle, path))
+                            })
                         }
                     }
                     SecondaryButton("مجلد جديد", modifier = Modifier.weight(1f), icon = R.drawable.ic_folderplus) { newFolder = true }

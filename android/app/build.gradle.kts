@@ -92,6 +92,11 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-    // QR codes for identity cards (encoding and decoding only; no camera library).
+    // QR codes for identity cards (encoding and decoding only).
     implementation("com.google.zxing:core:3.5.3")
+    // The secure camera: photos and videos straight into a vault.
+    implementation("androidx.camera:camera-camera2:1.4.1")
+    implementation("androidx.camera:camera-lifecycle:1.4.1")
+    implementation("androidx.camera:camera-view:1.4.1")
+    implementation("androidx.camera:camera-video:1.4.1")
 }

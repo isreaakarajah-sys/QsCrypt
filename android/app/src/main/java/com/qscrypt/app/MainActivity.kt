@@ -40,6 +40,7 @@ import com.qscrypt.app.ui.AttemptsScreen
 import com.qscrypt.app.ui.BenchScreen
 import com.qscrypt.app.ui.BackupScreen
 import com.qscrypt.app.ui.CalculatorScreen
+import com.qscrypt.app.ui.CameraScreen
 import com.qscrypt.app.ui.EncryptPhoneScreen
 import com.qscrypt.app.ui.PhoneCategoryScreen
 import com.qscrypt.app.ui.PhoneDirScreen
@@ -241,7 +242,7 @@ private fun Router() {
     }
     key(screen) {
         // Viewers use the whole screen; everything else keeps a comfortable width on tablets.
-        val fullScreen = screen is Screen.Viewer || screen is Screen.Gallery || screen is Screen.Media || screen is Screen.Pdf
+        val fullScreen = screen is Screen.Viewer || screen is Screen.Gallery || screen is Screen.Media || screen is Screen.Pdf || screen is Screen.Camera
         if (fullScreen) Screens(screen) else Centered { Screens(screen) }
     }
     AttemptsReport()
@@ -277,6 +278,7 @@ private fun Screens(screen: Screen) {
             is Screen.PhoneDir -> PhoneDirScreen(screen.path)
             is Screen.PhoneCategory -> PhoneCategoryScreen(screen.category)
             Screen.EncryptPhone -> EncryptPhoneScreen()
+            is Screen.Camera -> CameraScreen(screen.handle, screen.dir)
             Screen.ShareIn -> ShareInScreen()
         }
     }

@@ -41,6 +41,7 @@ sealed interface Screen {
     data class PhoneDir(val path: String) : Screen
     data class PhoneCategory(val category: String) : Screen
     data object EncryptPhone : Screen
+    data class Camera(val handle: Long, val dir: String) : Screen
     /** Files shared to QsCrypt from another app. */
     data object ShareIn : Screen
 }

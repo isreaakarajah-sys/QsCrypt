@@ -94,7 +94,7 @@ private fun rememberAccess(): Pair<Boolean, () -> Unit> {
         onDispose { owner.lifecycle.removeObserver(obs) }
     }
     val perms = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted = PhoneFiles.hasAccess(context) }
-    val ask = {
+    val ask: () -> Unit = {
         AppState.pickerOpen = true
         if (Build.VERSION.SDK_INT >= 30) {
             try {
@@ -105,6 +105,7 @@ private fun rememberAccess(): Pair<Boolean, () -> Unit> {
         } else {
             perms.launch(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE))
         }
+        Unit
     }
     return granted to ask
 }

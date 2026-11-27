@@ -41,6 +41,7 @@ pub fn call(method: &str, c: &Call, progress: &mut dyn FnMut(u64, u64) -> bool) 
         "fs.copy" => copy(c, progress),
         "fs.tree" => tree(c),
         "fs.find" => find(c, progress),
+        "fs.put" => put_blob(c),
         "bench.run" => bench(progress),
         "disguise.wrap" => disguise_wrap(c, progress),
         "disguise.unwrap" => disguise_unwrap(c, progress),
@@ -171,6 +172,22 @@ fn walk(fs: &mut dyn FileSystem, dir: &str, out: &mut Vec<(String, bool, u64)>) 
         }
     }
     Ok(())
+}
+
+/// Writes bytes held in memory as a file: photos from the in-app camera go
+/// straight into the vault, never through a plain file.
+fn put_blob(c: &Call) -> Result<String> {
+    let h = c.args.get("handle").i64_or(0);
+    let path = c.args.get("path").str_or("").to_string();
+    let overwrite = c.args.get("overwrite").bool_or(false);
+    let data = c.blob("data").ok_or_else(|| Error::invalid("missing data"))?;
+    if path.is_empty() || path == "/" {
+        return Err(Error::invalid("missing path"));
+    }
+    api::with_vault(h, |v| {
+        v.fs.write_file(&path, &mut &data[..], data.len() as u64, overwrite, &mut |_| true)?;
+        Ok(Obj::new().bool("ok", true).uint("size", data.len() as u64).end())
+    })
 }
 
 /// Items whose name contains the query (ignoring case), in a folder and
@@ -977,6 +994,19 @@ mod tests {
         let back = api2::call_bytes("backup.open", "{\"password\":0,\"data\":1}", &[Secret::from_slice(b"backup pass"), Secret::from_slice(&sealed)], &[]).expect("opened");
         assert_eq!(back, b"{\"qscryptBackup\":1}");
         assert!(api2::call_bytes("backup.open", "{\"password\":0,\"data\":1}", &[Secret::from_slice(b"wrong"), Secret::from_slice(&sealed)], &[]).is_none());
+    }
+
+    #[test]
+    fn put_writes_memory_as_a_file() {
+        let (p, h) = volume("put.hc", 8, "fat");
+        let photo = [Secret::from_slice(&[0xFFu8, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4])];
+        let r = api2::call("fs.put", &format!("{{\"handle\":{h},\"path\":\"/IMG_1.jpg\",\"data\":0}}"), &photo, &[], &mut |_, _| true);
+        assert!(r.contains("\"ok\":true"), "{r}");
+        let again = api2::call("fs.put", &format!("{{\"handle\":{h},\"path\":\"/IMG_1.jpg\",\"data\":0}}"), &photo, &[], &mut |_, _| true);
+        assert!(!again.contains("\"ok\":true"), "{again}");
+        assert_eq!(api::read_range(h, "/IMG_1.jpg", 0, 8).unwrap(), vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4]);
+        api::close_volume(h);
+        let _ = std::fs::remove_file(p);
     }
 
     #[test]
