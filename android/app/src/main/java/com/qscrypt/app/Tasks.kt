@@ -2,7 +2,9 @@ package com.qscrypt.app
 
 import android.content.Context
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
+import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -129,8 +131,49 @@ object Transfers {
         }
     }
 
-    /** Resumes a copy remembered from before a restart, once both vaults are open. */
-    fun resume(context: Context, p: Jobs.Pending): String? {
+    /** Resumes a job remembered from before a restart, once its vaults are open. */
+    fun resume(context: Context, p: Jobs.Pending): String? = when (p.kind) {
+        "copy" -> resumeCopy(context, p)
+        "phoneImport", "phoneExport", "importDocs", "exportTree" -> resumeTransfer(context, p)
+        else -> "لا يمكن استئناف هذه العملية."
+    }
+
+    private fun session(key: String): Session? = AppState.sessions.firstOrNull { it.stableKey == key }
+
+    private fun resumeTransfer(context: Context, p: Jobs.Pending): String? {
+        val s = p.spec
+        val vaultKey = s.optString(if (p.kind == "phoneImport" || p.kind == "importDocs") "dst" else "src")
+        val vaultName = s.optString(if (p.kind == "phoneImport" || p.kind == "importDocs") "dstName" else "srcName")
+        val v = session(vaultKey) ?: return "افتح «$vaultName» أولاً."
+        if (p.kind == "phoneImport" || p.kind == "phoneExport") {
+            if (!PhoneFiles.hasAccess(context)) return "اسمح للتطبيق بالوصول إلى ملفات الهاتف أولاً (تبويب ملفاتي)."
+        }
+        Jobs.dropPending(p)
+        val uid = s.optString("uid")
+        when (p.kind) {
+            "phoneImport" -> {
+                val arr = s.optJSONArray("paths") ?: JSONArray()
+                importPhone(context, v, s.optString("dest", "/"), (0 until arr.length()).map { arr.getString(it) }, s.optBoolean("move"), s.optString("title").ifEmpty { null }, resume = true, uid = uid)
+            }
+            "phoneExport" -> exportPhone(context, v, s.optString("dir", "/"), items(s), s.optString("dest"), s.optBoolean("move"), resume = true, uid = uid)
+            "importDocs" -> {
+                val arr = s.optJSONArray("docs") ?: JSONArray()
+                val docs = (0 until arr.length()).map { i -> arr.getJSONObject(i).let { Doc(Uri.parse(it.optString("uri")), it.optString("name"), it.optLong("size")) } }
+                importDocs(context, v, s.optString("dir", "/"), docs, resumeFrom = s.optInt("done"), uid = uid)
+            }
+            "exportTree" -> exportTo(context, v, s.optString("dir", "/"), items(s), Uri.parse(s.optString("tree")), resumeFrom = s.optInt("done"), uid = uid)
+        }
+        return null
+    }
+
+    private fun items(s: JSONObject): List<Item> {
+        val arr = s.optJSONArray("items") ?: JSONArray()
+        return (0 until arr.length()).map { i -> arr.getJSONObject(i).let { Item(it.optString("name"), it.optBoolean("dir"), it.optLong("size")) } }
+    }
+
+    private fun itemsJson(items: List<Item>) = JSONArray().apply { items.forEach { put(JSONObject().put("name", it.name).put("dir", it.dir).put("size", it.size)) } }
+
+    private fun resumeCopy(context: Context, p: Jobs.Pending): String? {
         val s = p.spec
         val from = AppState.sessions.firstOrNull { it.stableKey == s.optString("src") } ?: return "افتح «${s.optString("srcName")}» أولاً."
         val to = AppState.sessions.firstOrNull { it.stableKey == s.optString("dst") } ?: return "افتح «${s.optString("dstName")}» أولاً."
@@ -160,15 +203,24 @@ object Transfers {
     /** A document picked on the device, with its name and size. */
     data class Doc(val uri: Uri, val name: String, val size: Long)
 
-    /** Adds documents from the device to a vault folder ("name (2)" if taken). */
-    fun importDocs(context: Context, s: Session, dir: String, docs: List<Doc>, onEnd: ((Jobs.Job) -> Unit)? = null): Jobs.Job {
+    /**
+     * Adds documents from the device to a vault folder ("name (2)" if taken).
+     * Resumable after a restart: the documents' access is kept, and the job
+     * remembers how many are done.
+     */
+    fun importDocs(context: Context, s: Session, dir: String, docs: List<Doc>, onEnd: ((Jobs.Job) -> Unit)? = null, resumeFrom: Int = 0, uid: String = ""): Jobs.Job {
+        if (resumeFrom == 0) docs.forEach { Saf.persist(context, it.uri) }
+        val spec = JSONObject().put("uid", uid.ifEmpty { System.currentTimeMillis().toString() })
+            .put("dst", s.stableKey).put("dstName", s.container.name).put("dir", dir).put("done", resumeFrom)
+            .put("docs", JSONArray().apply { docs.forEach { put(JSONObject().put("uri", it.uri.toString()).put("name", it.name).put("size", it.size)) } })
         val title = if (docs.size == 1) "إضافة «${docs[0].name}»" else "إضافة ${docs.size} ملفات"
-        return Jobs.start(context, "import", title, listOf(s.handle), onEnd = onEnd) work@{
+        return Jobs.start(context, "importDocs", title, listOf(s.handle), spec, onEnd) work@{
             val total = docs.sumOf { it.size.coerceAtLeast(0) }
             job.total = total
             val taken = names(s.handle, dir)
-            var base = 0L
+            var base = docs.take(resumeFrom).sumOf { it.size.coerceAtLeast(0) }
             for ((i, d) in docs.withIndex()) {
+                if (i < resumeFrom) continue
                 if (!checkpoint()) return@work fail("cancelled")
                 detail("${i + 1}/${docs.size} · ${d.name}")
                 val name = freeName(d.name, taken)
@@ -177,7 +229,10 @@ object Transfers {
                 if (!r.ok) return@work Reply(r.json.put("message", "«${d.name}»: " + r.json.optString("message")).toString())
                 taken += name
                 base += d.size.coerceAtLeast(0)
+                spec.put("done", i + 1)
+                Jobs.save()
             }
+            docs.forEach { Saf.release(context, it.uri) }
             okReply(if (docs.size == 1) "أُضيف «${docs[0].name}» مشفّراً." else "أُضيف ${docs.size} ملفات مشفّرة.")
         }
     }
@@ -240,10 +295,27 @@ object Transfers {
         }
     }
 
-    /** Exports items (files and folders) to a folder on the device picked with OpenDocumentTree. */
-    fun exportTo(context: Context, s: Session, dir: String, items: List<Item>, tree: Uri, onEnd: ((Jobs.Job) -> Unit)? = null): Jobs.Job {
+    /** A child of a SAF folder by name (to reuse folders a resumed export already made). */
+    private fun childDoc(context: Context, tree: Uri, parent: Uri, name: String): Uri? = runCatching {
+        val kids = DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getDocumentId(parent))
+        context.contentResolver.query(kids, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use { c ->
+            while (c.moveToNext()) if (c.getString(1) == name) return@runCatching DocumentsContract.buildDocumentUriUsingTree(tree, c.getString(0))
+            null
+        }
+    }.getOrNull()
+
+    /**
+     * Exports items (files and folders) to a folder on the device picked with
+     * OpenDocumentTree. Resumable after a restart: files are written in a fixed
+     * order and the job remembers how many are done.
+     */
+    fun exportTo(context: Context, s: Session, dir: String, items: List<Item>, tree: Uri, onEnd: ((Jobs.Job) -> Unit)? = null, resumeFrom: Int = 0, uid: String = ""): Jobs.Job {
+        if (resumeFrom == 0) Saf.persist(context, tree)
+        val spec = JSONObject().put("uid", uid.ifEmpty { System.currentTimeMillis().toString() })
+            .put("src", s.stableKey).put("srcName", s.container.name).put("dir", dir).put("done", resumeFrom)
+            .put("items", itemsJson(items)).put("tree", tree.toString())
         val title = if (items.size == 1) "تصدير «${items[0].name}»" else "تصدير ${items.size} عناصر"
-        return Jobs.start(context, "export", title, listOf(s.handle), onEnd = onEnd) work@{
+        return Jobs.start(context, "exportTree", title, listOf(s.handle), spec, onEnd) work@{
             var total = 0L
             for (it in items) {
                 val r = Call("fs.tree").put("handle", s.handle).put("path", childOf(dir, it.name)).run()
@@ -256,14 +328,22 @@ object Transfers {
             suspend fun out(path: String, name: String, isDir: Boolean, size: Long, parent: Uri): Reply? {
                 if (!checkpoint()) return fail("cancelled")
                 if (isDir) {
-                    val folder = runCatching { DocumentsContract.createDocument(context.contentResolver, parent, DocumentsContract.Document.MIME_TYPE_DIR, name) }.getOrNull()
+                    val folder = (if (resumeFrom > 0) childDoc(context, tree, parent, name) else null)
+                        ?: runCatching { DocumentsContract.createDocument(context.contentResolver, parent, DocumentsContract.Document.MIME_TYPE_DIR, name) }.getOrNull()
                         ?: return fail("io", "cannot create the folder $name")
                     for (e in parseEntries(Reply(QsCore.list(s.handle, path)).json)) {
                         out(childOf(path, e.name), e.name, e.dir, e.size, folder)?.let { return it }
                     }
                     return null
                 }
+                if (files < resumeFrom) {
+                    // Written before the restart.
+                    base += size
+                    files++
+                    return null
+                }
                 detail(name)
+                (if (files == resumeFrom && resumeFrom > 0) childDoc(context, tree, parent, name) else null)?.let { Saf.delete(context, it) }   // the one cut short
                 val doc = runCatching { DocumentsContract.createDocument(context.contentResolver, parent, "application/octet-stream", name) }.getOrNull()
                     ?: return fail("io", "cannot create $name")
                 val pfd = Saf.open(context, doc, "w") ?: return fail("io", "cannot write $name")
@@ -274,10 +354,142 @@ object Transfers {
                 }
                 base += size
                 files++
+                spec.put("done", files)
+                Jobs.save()
                 return null
             }
             for (it in items) out(childOf(dir, it.name), it.name, it.dir, it.size, root)?.let { r -> return@work r }
+            Saf.release(context, tree)
             okReply("صُدّر $files ${if (files == 1) "ملف" else "ملفات"}. تذكّر أن النسخ المصدّرة غير مشفّرة.")
+        }
+    }
+
+    // ---------------------------------------------------------------- phone files
+
+    /**
+     * Encrypts files and folders of the phone's storage into a vault folder,
+     * keeping their folder structure. With [move], each original is deleted as
+     * soon as its encrypted copy is written. Resumable after a restart: what is
+     * already in the vault with the same size is skipped (and, for a move,
+     * originals already deleted are done).
+     */
+    fun importPhone(context: Context, s: Session, dir: String, paths: List<String>, move: Boolean, title: String? = null, resume: Boolean = false, uid: String = "", onEnd: ((Jobs.Job) -> Unit)? = null): Jobs.Job {
+        val spec = JSONObject().put("uid", uid.ifEmpty { System.currentTimeMillis().toString() })
+            .put("dst", s.stableKey).put("dstName", s.container.name).put("dest", dir)
+            .put("paths", JSONArray(paths)).put("move", move).put("title", title ?: "")
+        val tops = paths.map(::File)
+        val label = title ?: (if (move) "نقل " else "تشفير ") + (if (tops.size == 1) "«${tops[0].name}»" else "${tops.size} عناصر") + " إلى ${s.container.name.substringBeforeLast('.')}"
+        return Jobs.start(context, "phoneImport", label, listOf(s.handle), spec, onEnd) work@{
+            detail("قراءة الملفات…")
+            val present = tops.filter { it.exists() }
+            val owner = HashMap<String, File>()
+            val all = mutableListOf<File>()
+            for (t in present) PhoneFiles.walk(listOf(t)).forEach { f -> owner[f.absolutePath] = t; all += f }
+            val total = all.sumOf { it.length() }
+            job.total = total
+            val listed = HashMap<String, Map<String, Entry>>()
+            fun existing(vdir: String): Map<String, Entry> = listed.getOrPut(vdir) { parseEntries(Reply(QsCore.list(s.handle, vdir)).json).associateBy { it.name } }
+            // New items get a free name at the top; a resumed job merges into what it made.
+            val taken = existing(dir).keys.toMutableSet()
+            val topName = present.associate { t -> t.absolutePath to (if (resume) t.name else freeName(t.name, taken).also { taken += it }) }
+            val made = mutableSetOf("/")
+            fun ensureDir(v: String): Reply? {
+                if (v in made) return null
+                val parent = v.substringBeforeLast('/').ifEmpty { "/" }
+                ensureDir(parent)?.let { return it }
+                val m = Reply(QsCore.mkdir(s.handle, v))
+                if (!m.ok && m.code != "exists") return m
+                made += v
+                listed.remove(parent)
+                return null
+            }
+            ensureDir(dir)?.let { return@work it }
+            var base = 0L
+            var done = 0
+            for (f in all) {
+                if (!checkpoint()) return@work fail("cancelled")
+                val top = owner[f.absolutePath]!!
+                val rel = f.absolutePath.removePrefix(top.absolutePath).trimStart('/')
+                val name = topName[top.absolutePath]!!
+                val vpath = if (rel.isEmpty()) childOf(dir, name) else childOf(childOf(dir, name), rel)
+                val vdir = vpath.substringBeforeLast('/').ifEmpty { "/" }
+                ensureDir(vdir)?.let { return@work it }
+                val size = f.length()
+                val have = existing(vdir)[f.name]
+                if (have == null || have.dir || have.size != size) {
+                    detail("${done + 1}/${all.size} · ${f.name}")
+                    val pfd = runCatching { ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY) }.getOrNull()
+                        ?: return@work fail("io", "cannot open ${f.name}")
+                    val r = pfd.use { Reply(QsCore.importFile(s.handle, it.fd, size, vpath, true, progress(base, total))) }
+                    if (!r.ok) return@work Reply(r.json.put("message", "«${f.name}»: " + r.json.optString("message")).toString())
+                    listed.remove(vdir)
+                }
+                if (move && f.delete()) PhoneFiles.rescan(listOf(f))
+                base += size
+                done++
+                job.done = base
+            }
+            // Folders emptied by a move go too.
+            if (move) present.filter { it.isDirectory }.forEach { it.deleteRecursively() }
+            val n = "$done ${if (done == 1) "ملف" else "ملفات"}"
+            okReply(if (move) "شُفّر $n ونُقل إلى الخزنة، وحُذفت الأصول من الهاتف." else "شُفّر $n داخل الخزنة. الأصول ما زالت على الهاتف.")
+        }
+    }
+
+    /**
+     * Writes vault items into a folder on the phone (decrypted copies). With
+     * [move], they are removed from the vault afterwards. Resumable: files
+     * already on the phone with the same size are skipped.
+     */
+    fun exportPhone(context: Context, s: Session, dir: String, items: List<Item>, dest: String, move: Boolean, resume: Boolean = false, uid: String = "", onEnd: ((Jobs.Job) -> Unit)? = null): Jobs.Job {
+        val spec = JSONObject().put("uid", uid.ifEmpty { System.currentTimeMillis().toString() })
+            .put("src", s.stableKey).put("srcName", s.container.name).put("dir", dir)
+            .put("items", itemsJson(items)).put("dest", dest).put("move", move)
+        val title = (if (move) "نقل " else "نسخ ") + (if (items.size == 1) "«${items[0].name}»" else "${items.size} عناصر") + " إلى الهاتف"
+        return Jobs.start(context, "phoneExport", title, listOf(s.handle), spec, onEnd) work@{
+            var total = 0L
+            for (it in items) {
+                val r = Call("fs.tree").put("handle", s.handle).put("path", childOf(dir, it.name)).run()
+                if (r.ok) total += r.json.optLong("total")
+            }
+            job.total = total
+            var base = 0L
+            var files = 0
+            val written = mutableListOf<File>()
+            val into = File(dest).apply { mkdirs() }
+            suspend fun out(path: String, name: String, isDir: Boolean, size: Long, parent: File, top: Boolean): Reply? {
+                if (!checkpoint()) return fail("cancelled")
+                if (isDir) {
+                    val folder = File(parent, if (top && !resume) PhoneFiles.freeName(parent, name) else name)
+                    if (!folder.isDirectory && !folder.mkdirs()) return fail("io", "cannot create the folder $name")
+                    for (e in parseEntries(Reply(QsCore.list(s.handle, path)).json)) {
+                        out(childOf(path, e.name), e.name, e.dir, e.size, folder, false)?.let { return it }
+                    }
+                    return null
+                }
+                val target = File(parent, if (top && !resume) PhoneFiles.freeName(parent, name) else name)
+                if (!(target.isFile && target.length() == size)) {
+                    detail(name)
+                    val pfd = runCatching { ParcelFileDescriptor.open(target, ParcelFileDescriptor.MODE_CREATE or ParcelFileDescriptor.MODE_TRUNCATE or ParcelFileDescriptor.MODE_WRITE_ONLY) }.getOrNull()
+                        ?: return fail("io", "cannot write $name")
+                    val r = pfd.use { Reply(QsCore.exportFile(s.handle, path, it.fd, progress(base, total))) }
+                    if (!r.ok) {
+                        target.delete()
+                        return r
+                    }
+                    written += target
+                }
+                base += size
+                files++
+                return null
+            }
+            for (it in items) out(childOf(dir, it.name), it.name, it.dir, it.size, into, true)?.let { r -> PhoneFiles.rescan(written); return@work r }
+            PhoneFiles.rescan(written)
+            if (move) for (it in items) {
+                val r = Reply(QsCore.remove(s.handle, childOf(dir, it.name)))
+                if (!r.ok) return@work r
+            }
+            okReply((if (move) "نُقل" else "نُسخ") + " $files ${if (files == 1) "ملف" else "ملفات"} إلى الهاتف. تذكّر أنها غير مشفّرة هناك.")
         }
     }
 

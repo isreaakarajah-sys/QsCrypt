@@ -28,6 +28,7 @@ class QsApplication : Application() {
         AppState.init(this)
         Jobs.init(this)
         Jobs.loadPending()
+        PhoneFiles.init(this)
         UsbDrives.init(this)
         Guard.init(this)
         Guard.cleanCache(this)

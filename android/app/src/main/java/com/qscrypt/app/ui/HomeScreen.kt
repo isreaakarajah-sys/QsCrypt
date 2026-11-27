@@ -66,6 +66,7 @@ fun BottomNav(current: Screen) {
         Box(Modifier.fillMaxWidth().height(1.dp).background(Qs.line))
         Row(Modifier.fillMaxWidth().height(76.dp)) {
             NavTab(R.drawable.ic_vault, "خزناتي", current == Screen.Home) { AppState.tab(Screen.Home) }
+            NavTab(R.drawable.ic_folder, "ملفاتي", current == Screen.Phone) { AppState.tab(Screen.Phone) }
             NavTab(R.drawable.ic_drive, "الأقراص", current == Screen.Drives) { AppState.tab(Screen.Drives) }
             NavTab(R.drawable.ic_users, "جهات الاتصال", current == Screen.Contacts) { AppState.tab(Screen.Contacts) }
             NavTab(R.drawable.ic_sliders, "الإعدادات", current == Screen.Settings) { AppState.tab(Screen.Settings) }
@@ -90,7 +91,7 @@ private fun androidx.compose.foundation.layout.RowScope.NavTab(icon: Int, label:
             QsIcon(icon, if (active) Qs.brass else Qs.muted, 21.dp)
         }
         Spacer(Modifier.height(4.dp))
-        Text(label, style = T.label.copy(fontSize = 11.5.sp, lineHeight = 16.sp, color = if (active) Qs.ivory else Qs.muted), maxLines = 1)
+        Text(label, style = T.label.copy(fontSize = 11.sp, lineHeight = 16.sp, color = if (active) Qs.ivory else Qs.muted), maxLines = 1, softWrap = false)
     }
 }
 

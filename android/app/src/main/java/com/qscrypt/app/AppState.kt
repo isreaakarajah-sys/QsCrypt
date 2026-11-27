@@ -37,6 +37,10 @@ sealed interface Screen {
     data object Attempts : Screen
     data object Diag : Screen
     data object Backup : Screen
+    data object Phone : Screen
+    data class PhoneDir(val path: String) : Screen
+    data class PhoneCategory(val category: String) : Screen
+    data object EncryptPhone : Screen
     /** Files shared to QsCrypt from another app. */
     data object ShareIn : Screen
 }
@@ -71,6 +75,8 @@ object AppState {
     /** The PIN was entered on the disguise calculator; only a second factor may remain. */
     var pinPassed by mutableStateOf(false)
     var clip by mutableStateOf<Clip?>(null)
+    /** Phone files copied or cut in «ملفاتي». */
+    var phoneClip by mutableStateOf<PhoneClip?>(null)
     /** Documents shared to the app, waiting for a destination. */
     var shared by mutableStateOf<List<Uri>>(emptyList())
     /** Shared documents handed to the QsCrypt encryption screen. */
@@ -126,6 +132,7 @@ object AppState {
         stack.clear()
         stack.add(Screen.Home)
         clip = null
+        phoneClip = null
         shared = emptyList()
         encryptShared = emptyList()
         attemptsToReport = 0

@@ -3,4 +3,6 @@
     <cache-path name="share" path="share/" />
     <!-- Photos of QR codes taken with the system camera app (no camera permission). -->
     <cache-path name="camera" path="camera/" />
+    <!-- Phone files opened or shared from «ملفاتي» (only the chosen file is granted, per intent). -->
+    <root-path name="phone" path="." />
 </paths>

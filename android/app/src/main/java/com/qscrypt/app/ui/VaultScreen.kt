@@ -562,6 +562,23 @@ fun VaultScreen(handle: Long, path: String) {
                     IconBtn(R.drawable.ic_close, "إلغاء النسخ", tint = Qs.muted) { AppState.clip = null }
                 }
             }
+            val phoneClip = AppState.phoneClip
+            if (phoneClip != null && !readOnly) {
+                // Files copied or cut in «ملفاتي»: encrypt them here.
+                Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text((if (phoneClip.move) "قص " else "نسخ ") + "${phoneClip.paths.size} من الهاتف", style = T.item, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(if (phoneClip.move) "تُشفَّر هنا ثم تُحذف الأصول من الهاتف" else "تُشفَّر هنا وتبقى الأصول على الهاتف", style = T.small, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Pill("الصق هنا", Qs.brass) {
+                        AppState.phoneClip = null
+                        job = Transfers.importPhone(context, session, path, phoneClip.paths, phoneClip.move, onEnd = ended)
+                    }
+                    Spacer(Modifier.width(6.dp))
+                    IconBtn(R.drawable.ic_close, "إلغاء النسخ", tint = Qs.muted) { AppState.phoneClip = null }
+                }
+            }
             if (readOnly) {
                 Box(Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) {
                     Note(

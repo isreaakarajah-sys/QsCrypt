@@ -40,6 +40,10 @@ import com.qscrypt.app.ui.AttemptsScreen
 import com.qscrypt.app.ui.BenchScreen
 import com.qscrypt.app.ui.BackupScreen
 import com.qscrypt.app.ui.CalculatorScreen
+import com.qscrypt.app.ui.EncryptPhoneScreen
+import com.qscrypt.app.ui.PhoneCategoryScreen
+import com.qscrypt.app.ui.PhoneDirScreen
+import com.qscrypt.app.ui.PhoneScreen
 import com.qscrypt.app.ui.DiagScreen
 import com.qscrypt.app.ui.Centered
 import com.qscrypt.app.ui.ContactsScreen
@@ -269,6 +273,10 @@ private fun Screens(screen: Screen) {
             Screen.Attempts -> AttemptsScreen()
             Screen.Diag -> DiagScreen()
             Screen.Backup -> BackupScreen()
+            Screen.Phone -> PhoneScreen()
+            is Screen.PhoneDir -> PhoneDirScreen(screen.path)
+            is Screen.PhoneCategory -> PhoneCategoryScreen(screen.category)
+            Screen.EncryptPhone -> EncryptPhoneScreen()
             Screen.ShareIn -> ShareInScreen()
         }
     }
