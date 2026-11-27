@@ -36,11 +36,17 @@ function Check([string]$letter, [string]$label) {
     $out = chkdsk "$letter`:" 2>&1 | Out-String
     $code = $LASTEXITCODE
     Write-Host $out
-    if ($code -ne 0 -or $out -notmatch 'found no problems') {
+    # mkntfs picks journal sizes Windows would not: chkdsk then only wants to
+    # resize $LogFile (which QsCrypt never changes). Anything else fails.
+    $problems = $out -match '(?im)^\s*(Errors found|Found |.*\bis (incorrect|invalid|corrupt)|Deleting|Correcting|Replacing|Inserting|Recovering|Cleaning up \d+ unused)'
+    $onlyLog = $out -match 'adjusting the size of the log file' -and -not $problems
+    if ($code -eq 0 -and $out -match 'found no problems') {
+        Write-Host "PASS chkdsk $label"
+    } elseif ($onlyLog) {
+        Write-Host "PASS chkdsk $label (only the journal size mkntfs chose)"
+    } else {
         Write-Host "FAIL chkdsk $label (exit $code)"
         $script:fail = 1
-    } else {
-        Write-Host "PASS chkdsk $label"
     }
 }
 
