@@ -1,0 +1,82 @@
+name: NTFS test images
+on:
+  push:
+    branches: [ntfs-images]
+permissions:
+  contents: write
+jobs:
+  linux:
+    name: Images made by mkntfs and ntfs-3g
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Make images
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ntfs-3g > /dev/null
+          set -e
+          mkdir -p out m
+          # 1. Empty, 16 MiB.
+          truncate -s 16M out/empty.img && mkntfs -Q -F -L EMPTY out/empty.img > /dev/null
+          # 2. Populated, 48 MiB: nested folders, a big folder (index blocks), Arabic names, fragments.
+          truncate -s 48M out/filled.img && mkntfs -Q -F -L FILLED out/filled.img > /dev/null
+          sudo ntfs-3g -o uid=$(id -u),gid=$(id -g) out/filled.img m
+          mkdir -p "m/docs/sub" "m/مجلد عربي" "m/big"
+          echo hello > m/hello.txt
+          head -c 3000000 /dev/urandom > m/docs/random.bin
+          head -c 777 /dev/urandom > "m/مجلد عربي/ملف.txt"
+          for i in $(seq 1 400); do echo "file $i" > "m/big/file-$i.txt"; done
+          for i in $(seq 1 12); do head -c 70000 /dev/urandom >> m/docs/frag_a.bin; head -c 30000 /dev/urandom >> m/docs/frag_b.bin; sync; done
+          sync && sudo umount m
+          # 3. A small 2 MiB-cluster-free variant with 4 KiB records? keep defaults, plus a 1 KiB-cluster one.
+          truncate -s 24M out/small-clusters.img && mkntfs -Q -F -c 1024 -L SMALLC out/small-clusters.img > /dev/null
+          gzip -9 out/*.img
+          ls -la out
+      - name: Commit
+        run: |
+          git config user.name QsCrypt && git config user.email qscrypt@users.noreply.github.com
+          mkdir -p images && cp out/*.gz images/
+          git add images && git commit -m "NTFS images (mkntfs) [skip ci]" && git push
+  windows:
+    name: Image formatted by Windows
+    runs-on: windows-latest
+    needs: linux
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ntfs-images
+      - name: Make a VHD with diskpart and fill it
+        shell: pwsh
+        run: |
+          $vhd = "$env:RUNNER_TEMP\win.vhd"
+          @"
+          create vdisk file="$vhd" maximum=40 type=fixed
+          select vdisk file="$vhd"
+          attach vdisk
+          create partition primary
+          format fs=ntfs quick label=WINVOL
+          assign letter=Q
+          "@ | Set-Content "$env:RUNNER_TEMP\dp.txt"
+          diskpart /s "$env:RUNNER_TEMP\dp.txt"
+          New-Item -ItemType Directory -Path "Q:\docs\sub" -Force | Out-Null
+          New-Item -ItemType Directory -Path "Q:\big" -Force | Out-Null
+          New-Item -ItemType Directory -Path "Q:\مجلد" -Force | Out-Null
+          Set-Content -Path "Q:\hello.txt" -Value "hello"
+          $rnd = New-Object byte[] 2500000; (New-Object Random 7).NextBytes($rnd); [IO.File]::WriteAllBytes("Q:\docs\random.bin", $rnd)
+          1..400 | ForEach-Object { Set-Content -Path "Q:\big\file-$_.txt" -Value "file $_" }
+          Set-Content -Path "Q:\مجلد\ملف عربي.txt" -Value "عربي"
+          Set-Content -Path "Q:\A Long File Name With Spaces.txt" -Value "8.3 alias expected"
+          @"
+          select vdisk file="$vhd"
+          detach vdisk
+          "@ | Set-Content "$env:RUNNER_TEMP\dp2.txt"
+          diskpart /s "$env:RUNNER_TEMP\dp2.txt"
+          New-Item -ItemType Directory -Path images -Force | Out-Null
+          $in = [IO.File]::OpenRead($vhd); $out = [IO.File]::Create("images\windows.vhd.gz")
+          $gz = New-Object IO.Compression.GZipStream($out, [IO.Compression.CompressionLevel]::Optimal); $in.CopyTo($gz); $gz.Close(); $in.Close()
+          Get-Item images\windows.vhd.gz
+      - name: Commit
+        shell: bash
+        run: |
+          git config user.name QsCrypt && git config user.email qscrypt@users.noreply.github.com
+          git pull -q --rebase || true
+          git add images && git commit -m "NTFS image (Windows) [skip ci]" && git push
