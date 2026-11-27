@@ -740,6 +740,9 @@ struct Ix {
     usns: HashMap<u64, u16>,
     dirty: BTreeSet<u64>,
     meta: bool,
+    /// Clusters taken for new index blocks since the last commit: given back
+    /// when a change is abandoned before it is written.
+    grown: Vec<(u64, u64)>,
 }
 
 impl Ix {
@@ -1326,7 +1329,9 @@ impl Ntfs {
         Ok(())
     }
 
-    /// Grows the $MFT, preferably right after its end.
+    /// Grows the $MFT, preferably right after its end. Record 0 is built and
+    /// checked before anything is written; on a refusal everything is given
+    /// back.
     fn extend_mft(&mut self) -> Result<()> {
         if self.mft_listed {
             return Err(Error::NoSpace);
@@ -1339,7 +1344,50 @@ impl Ntfs {
         let add = clusters * cs / rs;
         let near = self.mft.last().and_then(|r| r.lcn.map(|l| l + r.len));
         let new_runs = self.alloc_clusters(clusters, near, 8)?;
-        // Format the new records (not in use), then make them part of $MFT.
+        let mut mft = self.mft.clone();
+        for &(lcn, len) in &new_runs {
+            push_run(&mut mft, lcn, len);
+        }
+        let size = self.mft_size + add * rs;
+        // Room in the MFT's bitmap for the new records.
+        let need = align8((have + add).div_ceil(8) as usize);
+        let mut bitmap = self.st()?.mftbm.clone();
+        if bitmap.len() < need {
+            bitmap.resize(need, 0);
+        }
+        let mut more = Vec::new();
+        let at = match &self.st()?.mftbm_at {
+            MftBitmapAt::Resident => MftBitmapAt::Resident,
+            MftBitmapAt::NonResident { runs, alloc } => {
+                let (mut runs, mut alloc) = (runs.clone(), *alloc);
+                if need as u64 > alloc {
+                    let n = (need as u64 - alloc).div_ceil(cs);
+                    let near = runs.last().and_then(|r| r.lcn.map(|l| l + r.len));
+                    match self.alloc_clusters(n, near, 4) {
+                        Ok(got) => more = got,
+                        Err(e) => {
+                            self.release(&new_runs)?;
+                            return Err(e);
+                        }
+                    }
+                    for &(lcn, len) in &more {
+                        push_run(&mut runs, lcn, len);
+                        alloc += len * cs;
+                    }
+                }
+                MftBitmapAt::NonResident { runs, alloc }
+            }
+        };
+        let r0 = match self.mft_record0(&mft, size, &bitmap, &at) {
+            Ok(r) => r,
+            Err(e) => {
+                self.release(&new_runs)?;
+                self.release(&more)?;
+                return Err(e);
+            }
+        };
+        // Format the new records (not in use), zero new bitmap clusters,
+        // then make them part of $MFT.
         let mut n = have;
         for &(lcn, len) in &new_runs {
             let count = len * cs / rs;
@@ -1352,52 +1400,50 @@ impl Ntfs {
             self.disk.write_at(lcn * cs, &buf)?;
             n += count;
         }
-        for &(lcn, len) in &new_runs {
-            push_run(&mut self.mft, lcn, len);
+        for &(lcn, len) in &more {
+            self.disk.write_at(lcn * cs, &vec![0u8; (len * cs) as usize])?;
         }
-        self.mft_size += add * rs;
-        // Bitmap room for the new records.
-        let need = align8((have + add).div_ceil(8) as usize);
+        if let MftBitmapAt::NonResident { runs, .. } = &at {
+            runs_write(self.disk.as_mut(), cs, runs, 0, &bitmap)?;
+        }
+        self.mft = mft;
+        self.mft_size = size;
         let st = self.st()?;
-        if st.mftbm.len() < need {
-            st.mftbm.resize(need, 0);
-        }
-        if let MftBitmapAt::NonResident { runs, alloc } = &st.mftbm_at {
-            let (mut runs, mut alloc) = (runs.clone(), *alloc);
-            if need as u64 > alloc {
-                let more = (need as u64 - alloc).div_ceil(cs);
-                let near = runs.last().and_then(|r| r.lcn.map(|l| l + r.len));
-                for (lcn, len) in self.alloc_clusters(more, near, 4)? {
-                    self.disk.write_at(lcn * cs, &vec![0u8; (len * cs) as usize])?;
-                    push_run(&mut runs, lcn, len);
-                    alloc += len * cs;
-                }
-            }
-            let data = self.st()?.mftbm.clone();
-            runs_write(self.disk.as_mut(), cs, &runs, 0, &data)?;
-            let st = self.st()?;
-            st.mftbm_at = MftBitmapAt::NonResident { runs, alloc };
-            st.mftbm_dirty.clear();
-        }
-        self.write_mft_record0()
+        st.mftbm = bitmap;
+        st.mftbm_at = at;
+        st.mftbm_dirty.clear();
+        self.write_rec(&r0)
     }
 
-    /// Record 0 after its data or bitmap changed (also written to $MFTMirr).
-    fn write_mft_record0(&mut self) -> Result<()> {
+    /// Record 0 describing the given $MFT runs, size and bitmap.
+    fn mft_record0(&mut self, mft: &[Run], size: u64, bitmap: &[u8], at: &MftBitmapAt) -> Result<Rec> {
         let mut r = self.read_rec(0)?;
         let cs = self.cluster_size;
         let d = r.find(AT_DATA, &[]).ok_or_else(|| Error::corrupt("$MFT has no data"))?;
-        let runs = pairs(&self.mft);
+        let runs = pairs(mft);
         let alloc: u64 = runs.iter().map(|r| r.1).sum::<u64>() * cs;
-        r.replace(d, nonresident(AT_DATA, &[], &runs, alloc, self.mft_size, self.mft_size))?;
+        r.replace(d, nonresident(AT_DATA, &[], &runs, alloc, size, size))?;
         let b = r.find(AT_BITMAP, &[]).ok_or_else(|| Error::corrupt("$MFT has no bitmap"))?;
-        let st = self.w.as_deref().ok_or(Error::ReadOnly)?;
-        let len = st.mftbm.len() as u64;
-        let attr = match &st.mftbm_at {
-            MftBitmapAt::Resident => resident(AT_BITMAP, &[], &st.mftbm, false),
+        let len = bitmap.len() as u64;
+        let attr = match at {
+            MftBitmapAt::Resident => resident(AT_BITMAP, &[], bitmap, false),
             MftBitmapAt::NonResident { runs, alloc } => nonresident(AT_BITMAP, &[], &pairs(runs), *alloc, len, len),
         };
         r.replace(b, attr)?;
+        Ok(r)
+    }
+
+    /// Record 0 after its bitmap changed (resident bitmaps, tiny volumes).
+    fn write_mft_record0(&mut self) -> Result<()> {
+        let mft = self.mft.clone();
+        let size = self.mft_size;
+        let st = self.w.as_deref().ok_or(Error::ReadOnly)?;
+        let bitmap = st.mftbm.clone();
+        let at = match &st.mftbm_at {
+            MftBitmapAt::Resident => MftBitmapAt::Resident,
+            MftBitmapAt::NonResident { runs, alloc } => MftBitmapAt::NonResident { runs: runs.clone(), alloc: *alloc },
+        };
+        let r = self.mft_record0(&mft, size, &bitmap, &at)?;
         self.write_rec(&r)
     }
 
@@ -1488,6 +1534,7 @@ impl Ntfs {
             usns: HashMap::new(),
             dirty: BTreeSet::new(),
             meta: false,
+            grown: Vec::new(),
         })
     }
 
@@ -1524,6 +1571,7 @@ impl Ntfs {
         for (lcn, len) in self.alloc_clusters(clusters, near, 4)? {
             push_run(&mut ix.runs, lcn, len);
             ix.bytes += len * cs;
+            ix.grown.push((lcn, len));
         }
         let need = align8(ix.blocks().div_ceil(8) as usize).max(8);
         if ix.bitmap.len() < need {
@@ -1838,7 +1886,14 @@ impl Ntfs {
             self.write_rec(&r)?;
             ix.meta = false;
         }
+        ix.grown.clear();
         Ok(())
+    }
+
+    /// Gives back what an abandoned (never committed) change to `ix` took.
+    fn ix_abandon(&mut self, ix: &mut Ix) -> Result<()> {
+        let grown = std::mem::take(&mut ix.grown);
+        self.release(&grown)
     }
 
     /// The INDEX_ROOT header of a directory (index type, collation, sizes),
@@ -1855,17 +1910,32 @@ impl Ntfs {
 
     // -------------------------------------------------------- operations
 
-    fn check_deletable(&self, r: &Rec) -> Result<()> {
+    /// Refuses system records, hard-linked files (more than one name besides
+    /// a DOS short name) and reparse points.
+    fn check_deletable(&mut self, r: &Rec) -> Result<()> {
         if r.n < FIRST_USER_RECORD {
             return Err(Error::ReadOnly);
-        }
-        if r.links() > 1 {
-            return Err(Error::unsupported("deleting or moving an NTFS file with several hard links"));
         }
         if r.find(AT_REPARSE_POINT, &[]).is_some() {
             return Err(Error::unsupported("changing a Windows link or cloud placeholder (reparse point)"));
         }
+        let long_names = self.names_of(r)?.iter().filter(|v| v.get(65) != Some(&NS_DOS)).count();
+        if long_names > 1 {
+            return Err(Error::unsupported("deleting or moving an NTFS file with several hard links"));
+        }
         Ok(())
+    }
+
+    /// Every $FILE_NAME value of an item, extension records included.
+    fn names_of(&mut self, r: &Rec) -> Result<Vec<Vec<u8>>> {
+        let mut out: Vec<Vec<u8>> = r.all(AT_FILE_NAME).into_iter().map(|o| r.value(o).to_vec()).collect();
+        if r.find(AT_ATTRIBUTE_LIST, &[]).is_some() {
+            let base = Rec { n: r.n, b: r.b.clone() };
+            for x in self.item_records(base)?.into_iter().skip(1) {
+                out.extend(x.all(AT_FILE_NAME).into_iter().map(|o| x.value(o).to_vec()));
+            }
+        }
+        Ok(out)
     }
 
     /// The records an item spans: its base record and, with an attribute
@@ -1921,9 +1991,8 @@ impl Ntfs {
             }
         }
         if let Some(ix) = parent {
-            for o in base.all(AT_FILE_NAME) {
-                let v = base.value(o).to_vec();
-                if le64(&v, 0) & REF_MASK == ix.rec {
+            for v in self.names_of(&base)? {
+                if v.len() >= 66 && le64(&v, 0) & REF_MASK == ix.rec {
                     let n = base.n;
                     self.ix_remove(ix, &v, &|e: &Ent| e.record() == n)?;
                 }
@@ -2073,11 +2142,14 @@ impl Ntfs {
             }
         };
         self.write_rec(&rec)?;
-        if let Err(e) = self.ix_insert(&mut ix, i30_entry(n | (seq as u64) << 48, &fnv)).and_then(|_| self.ix_commit(&mut ix)) {
-            // Index blocks may have been taken: leave the rest to chkdsk.
-            self.damage();
+        if let Err(e) = self.ix_insert(&mut ix, i30_entry(n | (seq as u64) << 48, &fnv)) {
+            self.ix_abandon(&mut ix)?;
             self.free_record(&mut rec)?;
             self.release(&runs)?;
+            return Err(e);
+        }
+        if let Err(e) = self.ix_commit(&mut ix) {
+            self.damage();
             return Err(e);
         }
         Ok(())
@@ -2118,9 +2190,13 @@ impl Ntfs {
                 }
             };
             self.write_rec(&rec)?;
-            if let Err(e) = self.ix_insert(&mut ix, i30_entry(n | (seq as u64) << 48, &fnv)).and_then(|_| self.ix_commit(&mut ix)) {
-                self.damage();
+            if let Err(e) = self.ix_insert(&mut ix, i30_entry(n | (seq as u64) << 48, &fnv)) {
+                self.ix_abandon(&mut ix)?;
                 self.free_record(&mut rec)?;
+                return Err(e);
+            }
+            if let Err(e) = self.ix_commit(&mut ix) {
+                self.damage();
                 return Err(e);
             }
             Ok(())
@@ -2264,21 +2340,40 @@ impl Ntfs {
                 Err(e) => return Err(e),
             }
         };
-        let r = (|| -> Result<()> {
-            let n = it.record;
-            let file_ref = it.record | (new_rec.seq() as u64) << 48;
-            let mut fix = self.load_ix(from.record, &I30_NAME)?;
+        // Data moved out of the record in memory only: its clusters go back
+        // if the change is abandoned.
+        let moved_runs = match (rec.find(AT_DATA, &[]), self.read_rec(rec.n)?.find(AT_DATA, &[])) {
+            (Some(d), Some(_)) if moved && !rec.resident(d) && rec.flags() & REC_DIRECTORY == 0 => pairs(&rec.runs(d)?),
+            _ => Vec::new(),
+        };
+        let n = it.record;
+        let file_ref = it.record | (new_rec.seq() as u64) << 48;
+        let mut fix = self.load_ix(from.record, &I30_NAME)?;
+        let mut tix = if from.record == to.record { None } else { Some(self.load_ix(to.record, &I30_NAME)?) };
+        let staged = (|| -> Result<()> {
             for k in &old_keys {
                 self.ix_remove(&mut fix, k, &|e: &Ent| e.record() == n)?;
             }
-            if from.record == to.record {
-                self.ix_insert(&mut fix, i30_entry(file_ref, &fnv))?;
-                self.ix_commit(&mut fix)?;
-            } else {
-                let mut tix = self.load_ix(to.record, &I30_NAME)?;
-                self.ix_insert(&mut tix, i30_entry(file_ref, &fnv))?;
-                self.ix_commit(&mut fix)?;
-                self.ix_commit(&mut tix)?;
+            match tix.as_mut() {
+                None => self.ix_insert(&mut fix, i30_entry(file_ref, &fnv)),
+                Some(t) => self.ix_insert(t, i30_entry(file_ref, &fnv)),
+            }
+        })();
+        if let Err(e) = staged {
+            self.ix_abandon(&mut fix)?;
+            if let Some(t) = tix.as_mut() {
+                self.ix_abandon(t)?;
+            }
+            let old = self.read_rec(rec.n)?;
+            if old.find(AT_DATA, &[]).is_some_and(|o| old.resident(o)) {
+                self.release(&moved_runs)?;
+            }
+            return Err(e);
+        }
+        let r = (|| -> Result<()> {
+            self.ix_commit(&mut fix)?;
+            if let Some(t) = tix.as_mut() {
+                self.ix_commit(t)?;
             }
             self.write_rec(&new_rec)
         })();
@@ -2376,7 +2471,11 @@ impl Ntfs {
         let v = r.value(ro).to_vec();
         let ibs = le32(&v, 8) as u64;
         let coll = le32(&v, 4);
-        let alloc = if r.find(AT_INDEX_ALLOCATION, &I30_NAME).is_some() { Some(self.stream(dir, AT_INDEX_ALLOCATION, &I30)?) } else { None };
+        let alloc = match self.stream(dir, AT_INDEX_ALLOCATION, &I30) {
+            Ok(a) => Some(a),
+            Err(Error::NotFound) => None,
+            Err(e) => return Err(e),
+        };
         let bitmap = match self.stream(dir, AT_BITMAP, &I30) {
             Ok(Stream::Resident(b)) => b,
             Ok(s @ Stream::NonResident { .. }) => {
@@ -2592,6 +2691,13 @@ impl Ntfs {
                 }
             }
             if base {
+                let owner = le64(&rec.b, 32) & REF_MASK;
+                for o in rec.all(AT_FILE_NAME) {
+                    let v = rec.value(o).to_vec();
+                    if v.len() >= 66 {
+                        names.push((le64(&v, 0) & REF_MASK, owner, v));
+                    }
+                }
                 continue;
             }
             if rec.flags() & REC_DIRECTORY != 0 {
@@ -2600,22 +2706,23 @@ impl Ntfs {
             } else if n >= FIRST_USER_RECORD {
                 rep.files += 1;
             }
+            let listed = rec.find(AT_ATTRIBUTE_LIST, &[]).is_some();
             let mut links = 0;
             for o in rec.all(AT_FILE_NAME) {
                 let v = rec.value(o).to_vec();
                 if v.len() < 66 {
                     continue;
                 }
-                if v[65] != NS_DOS {
-                    links += 1;
-                }
+                links += 1;
                 if rec.b[o + 22] & 1 == 0 {
                     rep.bad_chains += 1;
                     rep.issue(format!("record {n}: file name not flagged as indexed"));
                 }
                 names.push((le64(&v, 0) & REF_MASK, n, v));
             }
-            if links != rec.links() as usize && n >= FIRST_USER_RECORD {
+            // Every name counts, a DOS short name too; with an attribute
+            // list some names may live in extension records.
+            if (links != rec.links() as usize && !listed || links > rec.links() as usize) && n >= FIRST_USER_RECORD {
                 rep.bad_chains += 1;
                 rep.issue(format!("record {n}: link count {} but {links} names", rec.links()));
             }

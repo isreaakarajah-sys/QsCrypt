@@ -87,14 +87,17 @@ round() { # name size_mib mkntfs-options...
   sudo losetup -d "$lo"
   if $M diff "$WORK/ours2" "$WORK/linux2"; then pass "$name: round trip with Linux writes"; else bad "$name: round trip"; fi
 
-  cp "$WORK/ours2" "$OUT/$name.manifest"
-  qemu-img convert -q -f raw -O vpc -o subformat=fixed,force_size=on "$img" "$OUT/$name.vhd"
+  # Windows mounts NTFS only when its sector size matches the disk's (512 here).
+  if [ "${WINDOWS:-yes}" = yes ]; then
+    cp "$WORK/ours2" "$OUT/$name.manifest"
+    qemu-img convert -q -f raw -O vpc -o subformat=fixed,force_size=on "$img" "$OUT/$name.vhd"
+  fi
   rm -f "$img"
 }
 
 round mkntfs-4k 300
 round mkntfs-1k 200 -c 1024
 round mkntfs-64k 400 -c 65536
-round mkntfs-4k-records 300 -s 4096 -c 4096
+WINDOWS=no round mkntfs-4k-records 300 -s 4096 -c 4096
 ls -la "$OUT"
 exit $fail

@@ -95,16 +95,24 @@ Detach $vhd
 # --- 3: disks formatted by mkntfs and written by QsCrypt on Linux
 foreach ($d in Get-ChildItem -Path 'ntfs-out' -Filter '*.vhd' -ErrorAction SilentlyContinue) {
     $name = $d.BaseName
-    Attach $d.FullName 'R'
-    Check 'R' "$name"
-    python $manifest walk 'R:\' @tops > "$work\$name.win.txt"
-    Same "ntfs-out\$name.manifest" "$work\$name.win.txt" "$name read by Windows"
-    Windows-Writes 'R'
-    Detach $d.FullName
-    Probe @('check', "$($d.FullName)@1")
-    Probe @('churn', "$($d.FullName)@1", '/stress2')
-    Attach $d.FullName 'R'
-    Check 'R' "$name after Windows and QsCrypt both wrote"
-    Detach $d.FullName
+    try {
+        Attach $d.FullName 'R'
+        Check 'R' "$name"
+        python $manifest walk 'R:\' @tops > "$work\$name.win.txt"
+        Same "ntfs-out\$name.manifest" "$work\$name.win.txt" "$name read by Windows"
+        Windows-Writes 'R'
+        Detach $d.FullName
+        Probe @('check', "$($d.FullName)@1")
+        Probe @('churn', "$($d.FullName)@1", '/stress2')
+        Probe @('check', "$($d.FullName)@1")
+        Attach $d.FullName 'R'
+        Check 'R' "$name after Windows and QsCrypt both wrote"
+        Detach $d.FullName
+    } catch {
+        Write-Host "FAIL $name: $_"
+        $script:fail = 1
+        try { Detach $d.FullName } catch {}
+    }
 }
+Copy-Item -Path $vhd -Destination 'ntfs-out\win.vhd' -ErrorAction SilentlyContinue
 exit $script:fail

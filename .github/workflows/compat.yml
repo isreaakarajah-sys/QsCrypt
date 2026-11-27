@@ -63,6 +63,13 @@ jobs:
       - name: Windows formats, QsCrypt writes, chkdsk checks (and back)
         shell: pwsh
         run: core/testdata/ntfs_windows.ps1
+      - name: Keep the disks as Windows left them
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-disks-after-windows
+          path: ntfs-out/*.vhd
+          retention-days: 3
 
   windows:
     name: BitLocker VHD on real Windows (informational)

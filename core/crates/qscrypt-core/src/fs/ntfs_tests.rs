@@ -312,3 +312,44 @@ fn ntfs_object_ids_leave_with_their_file() {
     clean(&mut fs, "object id");
     fs.flush().unwrap();
 }
+
+#[test]
+fn ntfs_full_disk_is_a_clean_refusal() {
+    let d = fixture(MKNTFS_4K);
+    let mut fs = rw(&d);
+    let mut n = 0;
+    // Big files until the clusters run out, then tiny ones until the
+    // records (and the room to grow the $MFT and the index) run out too.
+    loop {
+        let c = data(150_000, n);
+        match fs.write_file(&format!("/big {n}.bin"), &mut c.as_slice(), c.len() as u64, false, &mut |_| true) {
+            Ok(()) => n += 1,
+            Err(Error::NoSpace) => break,
+            Err(e) => panic!("big {n}: {e}"),
+        }
+    }
+    let mut m = 0;
+    loop {
+        let c = data(700 + (m as usize % 40) * 13, m);
+        match fs.write_file(&format!("/tiny file with a fairly long name {m}.txt"), &mut c.as_slice(), c.len() as u64, false, &mut |_| true) {
+            Ok(()) => m += 1,
+            Err(Error::NoSpace) | Err(Error::Unsupported(_)) => break,
+            Err(e) => panic!("tiny {m}: {e}"),
+        }
+        assert!(m < 100_000);
+    }
+    assert!(n > 10 && m > 0, "{n} big, {m} tiny");
+    clean(&mut fs, "full");
+    fs.flush().unwrap();
+    drop(fs);
+    // The refusals did not leave the volume marked for chkdsk.
+    let mut fs = rw(&d);
+    for i in 0..n / 2 {
+        fs.remove(&format!("/big {i}.bin")).unwrap();
+    }
+    put(&mut fs, "/after.bin", &data(400_000, 77));
+    assert_eq!(get(&mut fs, "/after.bin"), data(400_000, 77));
+    assert_eq!(get(&mut fs, &format!("/big {}.bin", n - 1)), data(150_000, n - 1));
+    clean(&mut fs, "after freeing");
+    fs.flush().unwrap();
+}
